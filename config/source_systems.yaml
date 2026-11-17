@@ -1,0 +1,72 @@
+# =============================================================================
+# source_systems.yaml — source systems, SLA tiers and match tolerances.
+#
+# Three declarative blocks, each targeting one control table. They live together
+# because they are reviewed together: when a tenant changes ERP, all three change.
+# =============================================================================
+
+blocks:
+
+  # ---------------------------------------------------------------------------
+  - target_table: ap_control.config.source_system_registry
+    key_columns: [tenant_id, source_system_id]
+    rows:
+      - tenant_id: TEN001
+        source_system_id: TEN001_SAP_PRD
+        source_system_name: Northwind SAP ECC Production
+        system_type: ERP
+        delivery_mechanism: VOLUME_FILE
+        file_encoding: ISO-8859-1        # SAP extracts are rarely UTF-8; assuming otherwise corrupts umlauts
+        contact_owner: b.schulz@northwind.example
+        extract_schedule: "0 2 * * *"
+        is_active: true
+
+      - tenant_id: TEN002
+        source_system_id: TEN002_ORAFUSION
+        source_system_name: Cascade Oracle Fusion AP
+        system_type: ERP
+        delivery_mechanism: VOLUME_FILE
+        file_encoding: UTF-8
+        contact_owner: dataops@cascade.example
+        extract_schedule: "0 3 * * *"
+        is_active: true
+
+      - tenant_id: TEN003
+        source_system_id: TEN003_COUPA
+        source_system_name: Meridian Coupa Procure-to-Pay
+        system_type: PROCUREMENT
+        delivery_mechanism: VOLUME_FILE
+        file_encoding: UTF-8
+        contact_owner: finance.systems@meridian.example
+        extract_schedule: "0 20 * * *"
+        is_active: true
+
+  # ---------------------------------------------------------------------------
+  - target_table: ap_control.config.sla_config
+    key_columns: [sla_tier, layer]
+    rows:
+      - {sla_tier: GOLD,   layer: BRONZE, max_latency_minutes: 30,  freshness_hours: 6,  alert_channel: PAGERDUTY, escalate_after_min: 15, is_active: true}
+      - {sla_tier: GOLD,   layer: SILVER, max_latency_minutes: 60,  freshness_hours: 8,  alert_channel: PAGERDUTY, escalate_after_min: 30, is_active: true}
+      - {sla_tier: GOLD,   layer: GOLD,   max_latency_minutes: 120, freshness_hours: 12, alert_channel: SLACK,     escalate_after_min: 60, is_active: true}
+      - {sla_tier: SILVER, layer: BRONZE, max_latency_minutes: 120, freshness_hours: 24, alert_channel: SLACK,     escalate_after_min: 120, is_active: true}
+      - {sla_tier: SILVER, layer: SILVER, max_latency_minutes: 240, freshness_hours: 30, alert_channel: SLACK,     escalate_after_min: 120, is_active: true}
+      - {sla_tier: SILVER, layer: GOLD,   max_latency_minutes: 480, freshness_hours: 36, alert_channel: EMAIL,     escalate_after_min: 240, is_active: true}
+      - {sla_tier: BRONZE, layer: BRONZE, max_latency_minutes: 720, freshness_hours: 48, alert_channel: EMAIL,     escalate_after_min: 480, is_active: true}
+      - {sla_tier: BRONZE, layer: SILVER, max_latency_minutes: 720, freshness_hours: 48, alert_channel: EMAIL,     escalate_after_min: 480, is_active: true}
+      - {sla_tier: BRONZE, layer: GOLD,   max_latency_minutes: 1440, freshness_hours: 72, alert_channel: EMAIL,    escalate_after_min: 720, is_active: true}
+
+  # ---------------------------------------------------------------------------
+  # Three-way match tolerances. Note TEN003 is deliberately looser on price and
+  # tighter on quantity: services-heavy spend where quantity is often 1 and price
+  # varies by rate card. This is exactly the kind of thing that must not be a
+  # constant in code.
+  - target_table: ap_control.config.tolerance_config
+    key_columns: [tenant_id, company_code, tolerance_type, effective_from]
+    rows:
+      - {tenant_id: TEN001, company_code: ALL, tolerance_type: PRICE,    lower_limit_pct: -2.0, upper_limit_pct: 2.0, lower_limit_abs: -50.00,  upper_limit_abs: 50.00,  combine_rule: OR,  block_on_breach: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, tolerance_type: QUANTITY, lower_limit_pct: 0.0,  upper_limit_pct: 5.0, lower_limit_abs: 0.00,    upper_limit_abs: 0.00,   combine_rule: AND, block_on_breach: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, tolerance_type: AMOUNT,   lower_limit_pct: -1.0, upper_limit_pct: 1.0, lower_limit_abs: -100.00, upper_limit_abs: 100.00, combine_rule: OR,  block_on_breach: false, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, tolerance_type: PRICE,    lower_limit_pct: -3.0, upper_limit_pct: 3.0, lower_limit_abs: -75.00,  upper_limit_abs: 75.00,  combine_rule: OR,  block_on_breach: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, tolerance_type: QUANTITY, lower_limit_pct: 0.0,  upper_limit_pct: 10.0, lower_limit_abs: 0.00,   upper_limit_abs: 0.00,   combine_rule: AND, block_on_breach: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, tolerance_type: PRICE,    lower_limit_pct: -5.0, upper_limit_pct: 5.0, lower_limit_abs: -200.00, upper_limit_abs: 200.00, combine_rule: AND, block_on_breach: false, effective_from: "2024-07-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, tolerance_type: QUANTITY, lower_limit_pct: 0.0,  upper_limit_pct: 0.0, lower_limit_abs: 0.00,    upper_limit_abs: 0.00,   combine_rule: AND, block_on_breach: true,  effective_from: "2024-07-01", effective_to: null, is_active: true}

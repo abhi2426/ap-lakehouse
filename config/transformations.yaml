@@ -1,0 +1,258 @@
+# =============================================================================
+# transformations.yaml — silver job registry (gold is in transformations_gold.yaml).
+#
+# The orchestrator derives its DAG from `depends_on` rather than from a
+# hand-drawn workflow, so adding a job cannot desynchronise the schedule from
+# the dependency graph.
+#
+# tenant_id: ALL means the job runs once across all tenants in a single pass.
+# This is the correct default for shared tables: three separate passes would
+# triple the small-file problem for no isolation benefit, because per decision
+# D1 the tables are shared anyway.
+#
+# cluster_columns always begins with tenant_id (decision D2).
+# scd_type SCD2 only on the five entities earned in decision D5.
+# =============================================================================
+
+target_table: ap_control.config.transformation_config
+key_columns: [job_id, tenant_id]
+
+rows:
+
+  # --- Silver: reference and master ----------------------------------------
+  - job_id: SL_VENDOR
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_vendor
+    source_tables: "ap_bronze.ap.br_vendor_master"
+    depends_on: null
+    write_mode: SCD2_MERGE
+    merge_keys: "tenant_id,vendor_id"
+    scd_type: SCD2
+    scd_tracked_columns: "vendor_name,country_code,tax_id,vat_registration,payment_terms_src,is_blocked,is_marked_delete"
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,vendor_id"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  - job_id: SL_VENDOR_BANK
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_vendor_bank
+    source_tables: "ap_bronze.ap.br_vendor_bank"
+    depends_on: "SL_VENDOR"
+    write_mode: SCD2_MERGE
+    merge_keys: "tenant_id,vendor_id,bank_country,bank_key,bank_account"
+    scd_type: SCD2
+    # Tracking the account itself means a changed account closes the old version
+    # and opens a new one, which is precisely the fraud-detection signal.
+    scd_tracked_columns: "bank_account,bank_key,account_holder,is_verified"
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,vendor_id"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  - job_id: SL_VENDOR_CHANGE_EVENT
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_vendor_change_event
+    source_tables: "ap_silver.ap.sl_vendor,ap_silver.ap.sl_vendor_bank"
+    depends_on: "SL_VENDOR,SL_VENDOR_BANK"
+    write_mode: MERGE
+    merge_keys: "tenant_id,vendor_id,change_type,valid_from"
+    scd_type: NONE
+    sequence_column: "valid_from"
+    cluster_columns: "tenant_id,change_type"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  # --- Silver: commitment chain --------------------------------------------
+  - job_id: SL_PO_HEADER
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_po_header
+    source_tables: "ap_bronze.ap.br_po_header"
+    depends_on: "SL_VENDOR"
+    write_mode: MERGE
+    merge_keys: "tenant_id,po_number"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,po_number"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  - job_id: SL_PO_LINE
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_po_line
+    source_tables: "ap_bronze.ap.br_po_line"
+    depends_on: "SL_PO_HEADER"
+    write_mode: MERGE
+    merge_keys: "tenant_id,po_number,po_line_number"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,po_number"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  - job_id: SL_GOODS_RECEIPT
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_goods_receipt
+    source_tables: "ap_bronze.ap.br_po_history"
+    depends_on: "SL_PO_LINE"
+    write_mode: MERGE
+    merge_keys: "tenant_id,receipt_doc_id,receipt_line"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,po_number"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  # --- Silver: invoice chain ------------------------------------------------
+  - job_id: SL_INVOICE_HEADER
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_invoice_header
+    source_tables: "ap_bronze.ap.br_invoice_header"
+    depends_on: "SL_VENDOR"
+    write_mode: MERGE
+    merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,posting_date"
+    optimize_frequency: DAILY
+    is_active: true
+
+  - job_id: SL_INVOICE_LINE
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_invoice_line
+    source_tables: "ap_bronze.ap.br_invoice_line"
+    depends_on: "SL_INVOICE_HEADER"
+    write_mode: MERGE
+    merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year,line_number"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,invoice_doc_id"        # lines carry no posting_date
+    optimize_frequency: DAILY
+    is_active: true
+
+  # TEN002 only: the accounting grain. Decision D11 keeps it separate from lines.
+  - job_id: SL_INVOICE_DISTRIBUTION
+    tenant_id: TEN002
+    layer: SILVER
+    target_table: ap_silver.ap.sl_invoice_distribution
+    source_tables: "ap_bronze.ap.br_invoice_distribution"
+    depends_on: "SL_INVOICE_LINE"
+    write_mode: MERGE
+    merge_keys: "tenant_id,invoice_doc_id,fiscal_year,line_number,distribution_number"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,invoice_doc_id"
+    optimize_frequency: DAILY
+    is_active: true
+
+  # --- Silver: derived business logic --------------------------------------
+  - job_id: SL_THREE_WAY_MATCH
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_three_way_match
+    source_tables: "ap_silver.ap.sl_invoice_line,ap_silver.ap.sl_po_line,ap_silver.ap.sl_goods_receipt"
+    depends_on: "SL_INVOICE_LINE,SL_PO_LINE,SL_GOODS_RECEIPT"
+    write_mode: MERGE
+    merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year,line_number"
+    scd_type: NONE
+    sequence_column: "evaluated_at"
+    cluster_columns: "tenant_id,match_status"
+    optimize_frequency: DAILY
+    is_active: true
+
+  - job_id: SL_DUPLICATE_CANDIDATE
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_duplicate_candidate
+    source_tables: "ap_silver.ap.sl_invoice_header"
+    depends_on: "SL_INVOICE_HEADER"
+    write_mode: MERGE
+    merge_keys: "tenant_id,candidate_pair_id"
+    scd_type: NONE
+    sequence_column: "scored_at"
+    cluster_columns: "tenant_id,score_band"
+    optimize_frequency: WEEKLY
+    is_active: true
+
+  - job_id: SL_GRIR_POSITION
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_grir_position
+    source_tables: "ap_silver.ap.sl_po_line,ap_silver.ap.sl_goods_receipt,ap_silver.ap.sl_invoice_line"
+    depends_on: "SL_GOODS_RECEIPT,SL_INVOICE_LINE"
+    write_mode: OVERWRITE
+    merge_keys: null
+    scd_type: NONE
+    cluster_columns: "tenant_id,company_code"
+    optimize_frequency: DAILY
+    is_active: true
+
+  - job_id: SL_AP_ITEM
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_ap_item
+    source_tables: "ap_silver.ap.sl_invoice_header,ap_silver.ap.sl_payment_application"
+    depends_on: "SL_INVOICE_HEADER,SL_PAYMENT_APPLICATION"
+    write_mode: MERGE
+    merge_keys: "tenant_id,company_code,accounting_doc_id,fiscal_year,line_item"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,is_open"
+    optimize_frequency: DAILY
+    is_active: true
+
+  - job_id: SL_PAYMENT
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_payment
+    source_tables: "ap_bronze.ap.br_payment_header"
+    depends_on: "SL_VENDOR"
+    write_mode: MERGE
+    merge_keys: "tenant_id,payment_doc_id,fiscal_year"
+    scd_type: SCD1
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,payment_date"
+    optimize_frequency: DAILY
+    is_active: true
+
+  - job_id: SL_PAYMENT_APPLICATION
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_payment_application
+    source_tables: "ap_bronze.ap.br_payment_application"
+    depends_on: "SL_PAYMENT,SL_INVOICE_HEADER"
+    write_mode: MERGE
+    # Fixed in Step 4: applications carry no fiscal_year of their own, and the
+    # three sources key them differently (SAP: run + document + line; Oracle: a
+    # surrogate application id; Coupa: payment + invoice). This is the union of
+    # those, compared null-safely, so each tenant's rows stay unique.
+    merge_keys: "tenant_id,company_code,run_date,run_id,payment_doc_id,invoice_doc_id,invoice_fiscal_year,invoice_line_number,application_id"
+    scd_type: NONE
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,payment_doc_id"
+    optimize_frequency: DAILY
+    is_active: true
+
+  # Added in Step 4. Approval events feed the lifecycle fact and the touchless
+  # metric. TEN003 has no approval stream: the job simply has no rows for it.
+  - job_id: SL_APPROVAL_EVENT
+    tenant_id: ALL
+    layer: SILVER
+    target_table: ap_silver.ap.sl_approval_event
+    source_tables: "ap_bronze.ap.br_approval_event"
+    depends_on: "SL_INVOICE_HEADER"
+    write_mode: MERGE
+    merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year,event_seq"
+    scd_type: NONE
+    sequence_column: "ingest_ts"
+    cluster_columns: "tenant_id,invoice_doc_id"
+    optimize_frequency: DAILY
+    is_active: true

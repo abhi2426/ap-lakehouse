@@ -1,0 +1,41 @@
+# =============================================================================
+# value_domains_silver.yaml — value domains first needed by the silver layer.
+#
+# Same target table as reference/reference_data.yaml. The loader merges both
+# files into one declared set before loading, so neither file can deactivate
+# the other's rows.
+#
+# UNIT OF MEASURE. Canonical units: EACH, KG, LITRE, METRE, HOUR.
+#
+# >>> Exercise E1 (Step 4) <<<
+# TEN003 sends PCE ("piece") for each, and there is deliberately NO row for it
+# below. Silver maps it to NULL and DQ_ALL_0504 quarantines those lines. The
+# fix is to add this row, re-run notebook 02, then re-drive with notebook 23:
+#
+#   - {tenant_id: TEN003, domain: UOM, source_value: PCE, canonical_value: EACH, canonical_label: Each, sort_order: 1, is_active: true}
+# =============================================================================
+
+target_table: ap_control.config.value_domain_mapping
+key_columns: [tenant_id, domain, source_value]
+
+rows:
+  - {tenant_id: TEN001, domain: UOM, source_value: EA,  canonical_value: EACH,  canonical_label: Each,  sort_order: 1, is_active: true}
+  - {tenant_id: TEN001, domain: UOM, source_value: PCE, canonical_value: EACH,  canonical_label: Each,  sort_order: 1, is_active: true}
+  - {tenant_id: TEN001, domain: UOM, source_value: KG,  canonical_value: KG,    canonical_label: Kilogram, sort_order: 2, is_active: true}
+  - {tenant_id: TEN001, domain: UOM, source_value: L,   canonical_value: LITRE, canonical_label: Litre, sort_order: 3, is_active: true}
+  - {tenant_id: TEN001, domain: UOM, source_value: M,   canonical_value: METRE, canonical_label: Metre, sort_order: 4, is_active: true}
+  - {tenant_id: TEN001, domain: UOM, source_value: HR,  canonical_value: HOUR,  canonical_label: Hour,  sort_order: 5, is_active: true}
+
+  - {tenant_id: TEN002, domain: UOM, source_value: EA,  canonical_value: EACH,  canonical_label: Each,  sort_order: 1, is_active: true}
+  - {tenant_id: TEN002, domain: UOM, source_value: PCE, canonical_value: EACH,  canonical_label: Each,  sort_order: 1, is_active: true}
+  - {tenant_id: TEN002, domain: UOM, source_value: KG,  canonical_value: KG,    canonical_label: Kilogram, sort_order: 2, is_active: true}
+  - {tenant_id: TEN002, domain: UOM, source_value: L,   canonical_value: LITRE, canonical_label: Litre, sort_order: 3, is_active: true}
+  - {tenant_id: TEN002, domain: UOM, source_value: M,   canonical_value: METRE, canonical_label: Metre, sort_order: 4, is_active: true}
+  - {tenant_id: TEN002, domain: UOM, source_value: HR,  canonical_value: HOUR,  canonical_label: Hour,  sort_order: 5, is_active: true}
+
+  # TEN003: no PCE row. See the header.
+  - {tenant_id: TEN003, domain: UOM, source_value: EA,  canonical_value: EACH,  canonical_label: Each,  sort_order: 1, is_active: true}
+  - {tenant_id: TEN003, domain: UOM, source_value: KG,  canonical_value: KG,    canonical_label: Kilogram, sort_order: 2, is_active: true}
+  - {tenant_id: TEN003, domain: UOM, source_value: L,   canonical_value: LITRE, canonical_label: Litre, sort_order: 3, is_active: true}
+  - {tenant_id: TEN003, domain: UOM, source_value: M,   canonical_value: METRE, canonical_label: Metre, sort_order: 4, is_active: true}
+  - {tenant_id: TEN003, domain: UOM, source_value: HR,  canonical_value: HOUR,  canonical_label: Hour,  sort_order: 5, is_active: true}

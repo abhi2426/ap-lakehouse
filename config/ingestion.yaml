@@ -1,0 +1,371 @@
+# =============================================================================
+# ingestion.yaml — one row per tenant x source x entity.
+#
+# The ingestion framework in Step 3 iterates this table and nothing else.
+# Onboarding a new source is an entry here plus its schema_mapping rows.
+#
+# YAML anchors carry per-tenant defaults so that a tenant-wide change (say, a new
+# reader option) is a one-line edit rather than twenty. PyYAML resolves them at
+# parse time, so the loader sees fully expanded rows and needs no merge logic.
+#
+# Path contract: /Volumes/ap_bronze/landing/inbox/{tenant_id}/{entity}/{yyyy}/{mm}/{dd}/
+# The tokens are resolved at runtime. A literal date anywhere in this file is a bug.
+# =============================================================================
+
+target_table: ap_control.config.ingestion_config
+key_columns: [config_id]
+
+# ---------------------------------------------------------------------------
+# Per-tenant defaults
+# ---------------------------------------------------------------------------
+_defaults:
+  ten001: &TEN001_DEFAULTS
+    tenant_id: TEN001
+    source_system_id: TEN001_SAP_PRD
+    source_format: DELIMITED
+    delimiter: "|"
+    has_header: false                    # SAP extracts here are positional; ordinal in schema_mapping carries the layout
+    quote_char: ""
+    multiline: false
+    source_path_pattern: "/Volumes/ap_bronze/landing/inbox/{tenant_id}/{entity}/{yyyy}/{mm}/{dd}"
+    load_type: FULL_SNAPSHOT
+    watermark_column: null
+    cdc_sequence_column: null
+    cdc_operation_column: null
+    schema_evolution: RESCUE
+    expected_frequency: DAILY
+    max_file_age_hours: 30
+    late_arrival_days: 3
+    reader_options: '{"encoding":"ISO-8859-1","emptyValue":"","nullValue":""}'
+    is_active: true
+
+  ten002: &TEN002_DEFAULTS
+    tenant_id: TEN002
+    source_system_id: TEN002_ORAFUSION
+    source_format: JSON
+    delimiter: null
+    has_header: null
+    quote_char: null
+    multiline: false                     # newline-delimited JSON, one object per line
+    source_path_pattern: "/Volumes/ap_bronze/landing/inbox/{tenant_id}/{entity}/{yyyy}/{mm}/{dd}"
+    load_type: CDC
+    watermark_column: LAST_UPDATE_DATE
+    cdc_sequence_column: CDC_SEQ
+    cdc_operation_column: CDC_OP
+    schema_evolution: RESCUE
+    expected_frequency: DAILY
+    max_file_age_hours: 30
+    late_arrival_days: 5
+    reader_options: '{"encoding":"UTF-8"}'
+    is_active: true
+
+  ten003: &TEN003_DEFAULTS
+    tenant_id: TEN003
+    source_system_id: TEN003_COUPA
+    source_format: CSV
+    delimiter: ","
+    has_header: true
+    quote_char: '"'
+    multiline: true                      # free-text vendor names contain embedded newlines
+    source_path_pattern: "/Volumes/ap_bronze/landing/inbox/{tenant_id}/{entity}/{yyyy}/{mm}/{dd}"
+    load_type: INCREMENTAL
+    watermark_column: last-modified
+    cdc_sequence_column: null
+    cdc_operation_column: null
+    schema_evolution: RESCUE
+    expected_frequency: DAILY
+    max_file_age_hours: 48               # SILVER tier, looser target
+    late_arrival_days: 14                # post-close corrections, per decision D4
+    reader_options: '{"encoding":"UTF-8","escape":"\"","ignoreLeadingWhiteSpace":false}'
+    is_active: true
+
+rows:
+  # ==========================================================================
+  # TEN001 — SAP-style, pipe-delimited, full snapshots
+  # ==========================================================================
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__vendor_master
+    entity: vendor_master
+    file_glob: "LFA1_*.dat"
+    target_table: ap_bronze.ap.br_vendor_master
+    primary_key_columns: "LIFNR"
+    schema_contract_ref: "contracts/TEN001/vendor_master.json"
+    load_priority: 10
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__vendor_bank
+    entity: vendor_bank
+    file_glob: "LFBK_*.dat"
+    target_table: ap_bronze.ap.br_vendor_bank
+    primary_key_columns: "LIFNR,BANKS,BANKL,BANKN"
+    schema_contract_ref: "contracts/TEN001/vendor_bank.json"
+    load_priority: 11
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__po_header
+    entity: po_header
+    file_glob: "EKKO_*.dat"
+    target_table: ap_bronze.ap.br_po_header
+    primary_key_columns: "EBELN"
+    schema_contract_ref: "contracts/TEN001/po_header.json"
+    load_priority: 20
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__po_line
+    entity: po_line
+    file_glob: "EKPO_*.dat"
+    target_table: ap_bronze.ap.br_po_line
+    primary_key_columns: "EBELN,EBELP"
+    schema_contract_ref: "contracts/TEN001/po_line.json"
+    load_priority: 21
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__po_history
+    entity: po_history
+    file_glob: "EKBE_*.dat"
+    target_table: ap_bronze.ap.br_po_history
+    primary_key_columns: "EBELN,EBELP,ZEKKN,VGABE,GJAHR,BELNR,BUZEI"
+    schema_contract_ref: "contracts/TEN001/po_history.json"
+    load_priority: 22
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__invoice_header
+    entity: invoice_header
+    file_glob: "RBKP_*.dat"
+    target_table: ap_bronze.ap.br_invoice_header
+    primary_key_columns: "BUKRS,BELNR,GJAHR"      # fiscal year is part of the key — trap 3 from Step 1
+    schema_contract_ref: "contracts/TEN001/invoice_header.json"
+    load_priority: 30
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__invoice_line
+    entity: invoice_line
+    file_glob: "RSEG_*.dat"
+    target_table: ap_bronze.ap.br_invoice_line
+    primary_key_columns: "BUKRS,BELNR,GJAHR,BUZEI"
+    schema_contract_ref: "contracts/TEN001/invoice_line.json"
+    load_priority: 31
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__payment_header
+    entity: payment_header
+    file_glob: "REGUH_*.dat"
+    target_table: ap_bronze.ap.br_payment_header
+    primary_key_columns: "ZBUKR,LAUFD,LAUFI,VBLNR"
+    schema_contract_ref: "contracts/TEN001/payment_header.json"
+    load_priority: 40
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__payment_application
+    entity: payment_application
+    file_glob: "REGUP_*.dat"
+    target_table: ap_bronze.ap.br_payment_application
+    primary_key_columns: "ZBUKR,LAUFD,LAUFI,VBLNR,BUKRS,BELNR,GJAHR,BUZEI"
+    schema_contract_ref: "contracts/TEN001/payment_application.json"
+    load_priority: 41
+
+  - <<: *TEN001_DEFAULTS
+    config_id: TEN001__TEN001_SAP_PRD__approval_event
+    entity: approval_event
+    file_glob: "APPRV_*.dat"
+    target_table: ap_bronze.ap.br_approval_event
+    primary_key_columns: "BUKRS,BELNR,GJAHR,EVENT_SEQ"
+    schema_contract_ref: "contracts/TEN001/approval_event.json"
+    load_priority: 50
+
+  # ==========================================================================
+  # TEN002 — Oracle-style, JSON with CDC deltas
+  # ==========================================================================
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__vendor_master
+    entity: vendor_master
+    file_glob: "suppliers_*.json"
+    target_table: ap_bronze.ap.br_vendor_master
+    primary_key_columns: "VENDOR_ID"
+    schema_contract_ref: "contracts/TEN002/vendor_master.json"
+    load_priority: 10
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__vendor_bank
+    entity: vendor_bank
+    file_glob: "supplier_banks_*.json"
+    target_table: ap_bronze.ap.br_vendor_bank
+    primary_key_columns: "EXT_BANK_ACCOUNT_ID"
+    schema_contract_ref: "contracts/TEN002/vendor_bank.json"
+    load_priority: 11
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__po_header
+    entity: po_header
+    file_glob: "po_headers_*.json"
+    target_table: ap_bronze.ap.br_po_header
+    primary_key_columns: "PO_HEADER_ID"
+    schema_contract_ref: "contracts/TEN002/po_header.json"
+    load_priority: 20
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__po_line
+    entity: po_line
+    file_glob: "po_lines_*.json"
+    target_table: ap_bronze.ap.br_po_line
+    primary_key_columns: "PO_LINE_ID"
+    schema_contract_ref: "contracts/TEN002/po_line.json"
+    load_priority: 21
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__po_history
+    entity: po_history
+    file_glob: "rcv_transactions_*.json"
+    target_table: ap_bronze.ap.br_po_history
+    primary_key_columns: "TRANSACTION_ID"
+    schema_contract_ref: "contracts/TEN002/po_history.json"
+    load_priority: 22
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__invoice_header
+    entity: invoice_header
+    file_glob: "ap_invoices_*.json"
+    target_table: ap_bronze.ap.br_invoice_header
+    primary_key_columns: "INVOICE_ID"
+    schema_contract_ref: "contracts/TEN002/invoice_header.json"
+    load_priority: 30
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__invoice_line
+    entity: invoice_line
+    file_glob: "ap_invoice_lines_*.json"
+    target_table: ap_bronze.ap.br_invoice_line
+    primary_key_columns: "INVOICE_LINE_ID"
+    schema_contract_ref: "contracts/TEN002/invoice_line.json"
+    load_priority: 31
+
+  # The distribution grain — trap 4 from Step 1. Modelled separately, per
+  # decision D11, because it is the accounting grain while lines are the
+  # reporting grain. Monetary aggregation happens at exactly one of them.
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__invoice_distribution
+    entity: invoice_distribution
+    file_glob: "ap_invoice_distributions_*.json"
+    target_table: ap_bronze.ap.br_invoice_distribution
+    primary_key_columns: "INVOICE_DISTRIBUTION_ID"
+    schema_contract_ref: "contracts/TEN002/invoice_distribution.json"
+    load_priority: 32
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__payment_header
+    entity: payment_header
+    file_glob: "ap_checks_*.json"
+    target_table: ap_bronze.ap.br_payment_header
+    primary_key_columns: "CHECK_ID"
+    schema_contract_ref: "contracts/TEN002/payment_header.json"
+    load_priority: 40
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__payment_application
+    entity: payment_application
+    file_glob: "ap_invoice_payments_*.json"
+    target_table: ap_bronze.ap.br_payment_application
+    primary_key_columns: "INVOICE_PAYMENT_ID"
+    schema_contract_ref: "contracts/TEN002/payment_application.json"
+    load_priority: 41
+
+  - <<: *TEN002_DEFAULTS
+    config_id: TEN002__TEN002_ORAFUSION__approval_event
+    entity: approval_event
+    file_glob: "ap_approval_history_*.json"
+    target_table: ap_bronze.ap.br_approval_event
+    primary_key_columns: "APPROVAL_HISTORY_ID"
+    schema_contract_ref: "contracts/TEN002/approval_event.json"
+    load_priority: 50
+
+  # ==========================================================================
+  # TEN003 — Coupa-style CSV. No approval_event and no distribution grain:
+  # this tenant simply does not have them, which is the realistic case and the
+  # reason downstream metrics must degrade gracefully rather than fail.
+  # ==========================================================================
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__vendor_master
+    entity: vendor_master
+    file_glob: "suppliers_*.csv"
+    target_table: ap_bronze.ap.br_vendor_master
+    primary_key_columns: "supplier-number"
+    schema_contract_ref: "contracts/TEN003/vendor_master.json"
+    load_priority: 10
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__vendor_bank
+    entity: vendor_bank
+    file_glob: "supplier_banking_*.csv"
+    target_table: ap_bronze.ap.br_vendor_bank
+    primary_key_columns: "supplier-number,bank-seq"
+    schema_contract_ref: "contracts/TEN003/vendor_bank.json"
+    load_priority: 11
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__po_header
+    entity: po_header
+    file_glob: "purchase_orders_*.csv"
+    target_table: ap_bronze.ap.br_po_header
+    primary_key_columns: "po-number"
+    schema_contract_ref: "contracts/TEN003/po_header.json"
+    load_priority: 20
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__po_line
+    entity: po_line
+    file_glob: "po_lines_*.csv"
+    target_table: ap_bronze.ap.br_po_line
+    primary_key_columns: "po-number,line-num"
+    schema_contract_ref: "contracts/TEN003/po_line.json"
+    load_priority: 21
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__po_history
+    entity: po_history
+    file_glob: "receipts_*.csv"
+    target_table: ap_bronze.ap.br_po_history
+    primary_key_columns: "receipt-id"
+    schema_contract_ref: "contracts/TEN003/po_history.json"
+    load_priority: 22
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__invoice_header
+    entity: invoice_header
+    file_glob: "invoices_*.csv"
+    target_table: ap_bronze.ap.br_invoice_header
+    primary_key_columns: "invoice-number,supplier-number"
+    schema_contract_ref: "contracts/TEN003/invoice_header.json"
+    load_priority: 30
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__invoice_line
+    entity: invoice_line
+    file_glob: "invoice_lines_*.csv"
+    target_table: ap_bronze.ap.br_invoice_line
+    # The line file carries no supplier number: the header has one, the lines do
+    # not. So the line key is only as unique as `invoice-number` is, and for this
+    # tenant the supplier's own number IS the invoice key. That is precisely why
+    # DQ_INV_HDR_0301 scores near-duplicates here instead of trusting the PK.
+    # Declaring a PK column the file does not contain would fail the ingestion
+    # contract check in notebook 04, which is how this was caught.
+    primary_key_columns: "invoice-number,line-num"
+    schema_contract_ref: "contracts/TEN003/invoice_line.json"
+    load_priority: 31
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__payment_header
+    entity: payment_header
+    file_glob: "payments_*.csv"
+    target_table: ap_bronze.ap.br_payment_header
+    primary_key_columns: "payment-id"
+    schema_contract_ref: "contracts/TEN003/payment_header.json"
+    load_priority: 40
+
+  - <<: *TEN003_DEFAULTS
+    config_id: TEN003__TEN003_COUPA__payment_application
+    entity: payment_application
+    file_glob: "payment_lines_*.csv"
+    target_table: ap_bronze.ap.br_payment_application
+    primary_key_columns: "payment-id,invoice-number"
+    schema_contract_ref: "contracts/TEN003/payment_application.json"
+    load_priority: 41

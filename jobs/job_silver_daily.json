@@ -1,0 +1,77 @@
+{
+  "name": "ap-lakehouse :: silver daily",
+  "environments": [
+    {
+      "environment_key": "serverless",
+      "spec": {
+        "client": "1",
+        "dependencies": [
+          "pyyaml"
+        ]
+      }
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "email_notifications": {
+    "on_failure": [
+      "{{OWNER_EMAIL}}"
+    ]
+  },
+  "tags": {
+    "project": "ap-lakehouse"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 30 5 * * ?",
+    "timezone_id": "UTC",
+    "pause_status": "PAUSED"
+  },
+  "tasks": [
+    {
+      "task_key": "run_silver",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/21_run_silver.py",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}",
+          "mode": "run"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless"
+    },
+    {
+      "task_key": "dq_scorecard",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/22_dq_scorecard.sql",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless",
+      "depends_on": [
+        {
+          "task_key": "run_silver"
+        }
+      ]
+    },
+    {
+      "task_key": "scd2_integrity",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/24_silver_maintenance.py",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}",
+          "optimize": "false",
+          "run_vacuum": "false"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless",
+      "depends_on": [
+        {
+          "task_key": "run_silver"
+        }
+      ]
+    }
+  ],
+  "description": "Reference definition (Jobs API 2.1). On Free Edition run the notebooks by hand. Replace {{REPO_ROOT}} and {{OWNER_EMAIL}} before importing. Schedules are created PAUSED."
+}

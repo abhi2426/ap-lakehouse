@@ -1,0 +1,142 @@
+# =============================================================================
+# reference_data.yaml — payment terms, tax codes, GL accounts, company codes,
+# and the tenant-specific value domain mappings.
+#
+# The value_domain_mapping block is where the three tenants' vocabularies are
+# reconciled. TEN001 says Z030, TEN002 says "30 Net", TEN003 says "net30".
+# All three become NET30. An unmapped value is a DQ failure (rule DQ_ALL_0504),
+# never a silent pass-through.
+#
+# Currency rates are generated rather than listed: see notebooks/02, which
+# produces a deterministic two-year daily series. Hand-listing 700 rates in
+# YAML would be unreviewable.
+# =============================================================================
+
+blocks:
+
+  # ---------------------------------------------------------------------------
+  - target_table: ap_control.ref.company_code
+    key_columns: [tenant_id, company_code]
+    rows:
+      - {tenant_id: TEN001, company_code: DE01, company_name: Northwind Manufacturing GmbH,   country_code: DE, functional_currency: EUR, fiscal_calendar: CALENDAR, is_active: true}
+      - {tenant_id: TEN001, company_code: DE02, company_name: Northwind Logistik GmbH,        country_code: DE, functional_currency: EUR, fiscal_calendar: CALENDAR, is_active: true}
+      # A foreign subsidiary booking in a different currency - this is what makes
+      # per-company-code, per-currency reconciliation non-optional.
+      - {tenant_id: TEN001, company_code: GB01, company_name: Northwind UK Ltd,               country_code: GB, functional_currency: GBP, fiscal_calendar: CALENDAR, is_active: true}
+      - {tenant_id: TEN002, company_code: US01, company_name: Cascade Retail Holdings Inc,    country_code: US, functional_currency: USD, fiscal_calendar: CUSTOM,   is_active: true}
+      - {tenant_id: TEN002, company_code: US02, company_name: Cascade Distribution LLC,       country_code: US, functional_currency: USD, fiscal_calendar: CUSTOM,   is_active: true}
+      - {tenant_id: TEN002, company_code: CA01, company_name: Cascade Canada ULC,             country_code: CA, functional_currency: CAD, fiscal_calendar: CUSTOM,   is_active: true}
+      - {tenant_id: TEN003, company_code: MER01, company_name: Meridian Services Pty Ltd,     country_code: AU, functional_currency: AUD, fiscal_calendar: JUL_JUN,  is_active: true}
+
+  # ---------------------------------------------------------------------------
+  - target_table: ap_control.ref.payment_terms
+    key_columns: [tenant_id, terms_code]
+    rows:
+      - {tenant_id: ALL, terms_code: NET30,     terms_label: "Net 30",        net_days: 30, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: NET45,     terms_label: "Net 45",        net_days: 45, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: NET60,     terms_label: "Net 60",        net_days: 60, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: NET90,     terms_label: "Net 90",        net_days: 90, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: IMMEDIATE, terms_label: "Due immediately", net_days: 0, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+      # Discount terms. 2/10 net 30 is roughly a 36% annualised return on paying
+      # 20 days early, which is why discount capture rate (KPI 19) matters.
+      - {tenant_id: ALL, terms_code: 2_10_N30,  terms_label: "2/10 Net 30",   net_days: 30, discount_pct: 2.0,  discount_days: 10,   baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: 1_15_N45,  terms_label: "1/15 Net 45",   net_days: 45, discount_pct: 1.0,  discount_days: 15,   baseline_date_rule: INVOICE_DATE, is_active: true}
+      - {tenant_id: ALL, terms_code: 3_5_N30,   terms_label: "3/5 Net 30",    net_days: 30, discount_pct: 3.0,  discount_days: 5,    baseline_date_rule: INVOICE_DATE, is_active: true}
+      # End-of-month baseline: due date is computed from month end, not invoice
+      # date. Applying INVOICE_DATE arithmetic here shifts every due date by weeks.
+      - {tenant_id: ALL, terms_code: EOM30,     terms_label: "Net 30 EOM",    net_days: 30, discount_pct: null, discount_days: null, baseline_date_rule: EOM,          is_active: true}
+      - {tenant_id: TEN003, terms_code: NET14,  terms_label: "Net 14",        net_days: 14, discount_pct: null, discount_days: null, baseline_date_rule: INVOICE_DATE, is_active: true}
+
+  # ---------------------------------------------------------------------------
+  - target_table: ap_control.ref.tax_code
+    key_columns: [tenant_id, country_code, tax_code, effective_from]
+    rows:
+      - {tenant_id: TEN001, country_code: DE, tax_code: V19, tax_description: "German VAT standard 19%",     tax_rate_pct: 19.0, tax_type: VAT, is_recoverable: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, country_code: DE, tax_code: V07, tax_description: "German VAT reduced 7%",       tax_rate_pct: 7.0,  tax_type: VAT, is_recoverable: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, country_code: DE, tax_code: V00, tax_description: "Exempt",                      tax_rate_pct: 0.0,  tax_type: EXEMPT, is_recoverable: false, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, country_code: DE, tax_code: RC0, tax_description: "EU reverse charge",           tax_rate_pct: 0.0,  tax_type: REVERSE_CHARGE, is_recoverable: true, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN001, country_code: GB, tax_code: V20, tax_description: "UK VAT standard 20%",         tax_rate_pct: 20.0, tax_type: VAT, is_recoverable: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, country_code: US, tax_code: ST0, tax_description: "No sales tax",                tax_rate_pct: 0.0,  tax_type: SALES_USE, is_recoverable: false, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, country_code: US, tax_code: ST7, tax_description: "State sales tax 7.25%",       tax_rate_pct: 7.25, tax_type: SALES_USE, is_recoverable: false, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, country_code: US, tax_code: WH3, tax_description: "Backup withholding 24%",      tax_rate_pct: 24.0, tax_type: WITHHOLDING, is_recoverable: false, effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN002, country_code: CA, tax_code: GST, tax_description: "Canada GST 5%",               tax_rate_pct: 5.0,  tax_type: GST, is_recoverable: true,  effective_from: "2024-01-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN003, country_code: AU, tax_code: GST10, tax_description: "Australian GST 10%",        tax_rate_pct: 10.0, tax_type: GST, is_recoverable: true,  effective_from: "2024-07-01", effective_to: null, is_active: true}
+      - {tenant_id: TEN003, country_code: AU, tax_code: FRE,   tax_description: "GST free",                  tax_rate_pct: 0.0,  tax_type: EXEMPT, is_recoverable: false, effective_from: "2024-07-01", effective_to: null, is_active: true}
+
+  # ---------------------------------------------------------------------------
+  # Only the accounts the AP domain actually needs. is_recon_account and
+  # is_grir_account are the two flags that make KPIs 29 and 31 possible.
+  - target_table: ap_control.ref.gl_account
+    key_columns: [tenant_id, company_code, gl_account]
+    rows:
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000160000", gl_account_name: "Trade payables - domestic", account_type: LIABILITY, account_group: AP, is_recon_account: true,  is_grir_account: false, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000161000", gl_account_name: "Trade payables - foreign",  account_type: LIABILITY, account_group: AP, is_recon_account: true,  is_grir_account: false, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000191100", gl_account_name: "GR/IR clearing",            account_type: LIABILITY, account_group: GRIR, is_recon_account: false, is_grir_account: true,  is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000400000", gl_account_name: "Raw materials consumed",    account_type: EXPENSE,   account_group: COGS, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000476000", gl_account_name: "Professional services",     account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000470000", gl_account_name: "Facilities and utilities",  account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+      # Deliberately inactive: invoices posted here trigger rule DQ_INV_LIN_0503.
+      - {tenant_id: TEN001, company_code: ALL, gl_account: "0000479900", gl_account_name: "Legacy misc expense (closed)", account_type: EXPENSE, account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: false}
+      - {tenant_id: TEN002, company_code: ALL, gl_account: "0000210000", gl_account_name: "Accounts payable",          account_type: LIABILITY, account_group: AP, is_recon_account: true,  is_grir_account: false, is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, gl_account: "0000215000", gl_account_name: "Accrued liabilities GR/IR", account_type: LIABILITY, account_group: GRIR, is_recon_account: false, is_grir_account: true,  is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, gl_account: "0000500000", gl_account_name: "Merchandise purchases",     account_type: EXPENSE,   account_group: COGS, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, gl_account: "0000610000", gl_account_name: "Store operating expense",   account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN002, company_code: ALL, gl_account: "0000620000", gl_account_name: "Marketing and advertising", account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, gl_account: "0000200100", gl_account_name: "Trade creditors",           account_type: LIABILITY, account_group: AP, is_recon_account: true,  is_grir_account: false, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, gl_account: "0000200900", gl_account_name: "Accrued expenses",          account_type: LIABILITY, account_group: GRIR, is_recon_account: false, is_grir_account: true,  is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, gl_account: "0000610100", gl_account_name: "Subcontractor costs",       account_type: EXPENSE,   account_group: COGS, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, gl_account: "0000620100", gl_account_name: "Travel and accommodation",  account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+      - {tenant_id: TEN003, company_code: ALL, gl_account: "0000630100", gl_account_name: "IT and software",           account_type: EXPENSE,   account_group: OPEX, is_recon_account: false, is_grir_account: false, is_active: true}
+
+  # ---------------------------------------------------------------------------
+  # The vocabulary reconciliation. Read PAYMENT_TERMS across the three tenants.
+  - target_table: ap_control.config.value_domain_mapping
+    key_columns: [tenant_id, domain, source_value]
+    rows:
+      # --- PAYMENT_TERMS ---
+      - {tenant_id: TEN001, domain: PAYMENT_TERMS, source_value: "Z030",      canonical_value: NET30,     canonical_label: "Net 30",      sort_order: 1, is_active: true}
+      - {tenant_id: TEN001, domain: PAYMENT_TERMS, source_value: "Z045",      canonical_value: NET45,     canonical_label: "Net 45",      sort_order: 2, is_active: true}
+      - {tenant_id: TEN001, domain: PAYMENT_TERMS, source_value: "Z060",      canonical_value: NET60,     canonical_label: "Net 60",      sort_order: 3, is_active: true}
+      - {tenant_id: TEN001, domain: PAYMENT_TERMS, source_value: "Z210",      canonical_value: 2_10_N30,  canonical_label: "2/10 Net 30", sort_order: 4, is_active: true}
+      - {tenant_id: TEN001, domain: PAYMENT_TERMS, source_value: "Z000",      canonical_value: IMMEDIATE, canonical_label: "Immediate",   sort_order: 5, is_active: true}
+      - {tenant_id: TEN002, domain: PAYMENT_TERMS, source_value: "30 NET",    canonical_value: NET30,     canonical_label: "Net 30",      sort_order: 1, is_active: true}
+      - {tenant_id: TEN002, domain: PAYMENT_TERMS, source_value: "45 NET",    canonical_value: NET45,     canonical_label: "Net 45",      sort_order: 2, is_active: true}
+      - {tenant_id: TEN002, domain: PAYMENT_TERMS, source_value: "60 NET",    canonical_value: NET60,     canonical_label: "Net 60",      sort_order: 3, is_active: true}
+      - {tenant_id: TEN002, domain: PAYMENT_TERMS, source_value: "2/10 NET 30", canonical_value: 2_10_N30, canonical_label: "2/10 Net 30", sort_order: 4, is_active: true}
+      - {tenant_id: TEN002, domain: PAYMENT_TERMS, source_value: "1/15 NET 45", canonical_value: 1_15_N45, canonical_label: "1/15 Net 45", sort_order: 5, is_active: true}
+      - {tenant_id: TEN003, domain: PAYMENT_TERMS, source_value: "NET30",     canonical_value: NET30,     canonical_label: "Net 30",      sort_order: 1, is_active: true}
+      - {tenant_id: TEN003, domain: PAYMENT_TERMS, source_value: "NET14",     canonical_value: NET14,     canonical_label: "Net 14",      sort_order: 2, is_active: true}
+      - {tenant_id: TEN003, domain: PAYMENT_TERMS, source_value: "NET60",     canonical_value: NET60,     canonical_label: "Net 60",      sort_order: 3, is_active: true}
+      - {tenant_id: TEN003, domain: PAYMENT_TERMS, source_value: "3/5 NET 30", canonical_value: 3_5_N30,  canonical_label: "3/5 Net 30",  sort_order: 4, is_active: true}
+
+      # --- DOC_TYPE: the credit memo mapping drives rule DQ_INV_HDR_0402 ---
+      - {tenant_id: TEN001, domain: DOC_TYPE, source_value: "RE", canonical_value: INVOICE,     canonical_label: "Invoice",     sort_order: 1, is_active: true}
+      - {tenant_id: TEN001, domain: DOC_TYPE, source_value: "KG", canonical_value: CREDIT_MEMO, canonical_label: "Credit memo", sort_order: 2, is_active: true}
+      - {tenant_id: TEN001, domain: DOC_TYPE, source_value: "KR", canonical_value: INVOICE,     canonical_label: "Invoice",     sort_order: 1, is_active: true}
+      # Added in Step 4: TEN001 posts logistics credit memos as RG. Missing, it
+      # quarantined every TEN001 credit memo as an unmapped domain value.
+      - {tenant_id: TEN001, domain: DOC_TYPE, source_value: "RG", canonical_value: CREDIT_MEMO, canonical_label: "Credit memo", sort_order: 2, is_active: true}
+      - {tenant_id: TEN002, domain: DOC_TYPE, source_value: "STANDARD",   canonical_value: INVOICE,     canonical_label: "Invoice",     sort_order: 1, is_active: true}
+      - {tenant_id: TEN002, domain: DOC_TYPE, source_value: "CREDIT",     canonical_value: CREDIT_MEMO, canonical_label: "Credit memo", sort_order: 2, is_active: true}
+      - {tenant_id: TEN002, domain: DOC_TYPE, source_value: "PREPAYMENT", canonical_value: PREPAYMENT,  canonical_label: "Prepayment",  sort_order: 3, is_active: true}
+      - {tenant_id: TEN003, domain: DOC_TYPE, source_value: "INVOICE",     canonical_value: INVOICE,     canonical_label: "Invoice",     sort_order: 1, is_active: true}
+      - {tenant_id: TEN003, domain: DOC_TYPE, source_value: "CREDIT_NOTE", canonical_value: CREDIT_MEMO, canonical_label: "Credit memo", sort_order: 2, is_active: true}
+
+      # --- CAPTURE_CHANNEL: drives touchless rate (KPI 11) ---
+      - {tenant_id: TEN001, domain: CAPTURE_CHANNEL, source_value: "EDI",    canonical_value: EDI,           canonical_label: "EDI",           sort_order: 1, is_active: true}
+      - {tenant_id: TEN001, domain: CAPTURE_CHANNEL, source_value: "OCR",    canonical_value: OCR,           canonical_label: "OCR/Email",     sort_order: 2, is_active: true}
+      - {tenant_id: TEN001, domain: CAPTURE_CHANNEL, source_value: "MANUAL", canonical_value: MANUAL,        canonical_label: "Manual entry",  sort_order: 4, is_active: true}
+      - {tenant_id: TEN002, domain: CAPTURE_CHANNEL, source_value: "EDI_810",      canonical_value: EDI,     canonical_label: "EDI",           sort_order: 1, is_active: true}
+      - {tenant_id: TEN002, domain: CAPTURE_CHANNEL, source_value: "SUPPLIER_PORTAL", canonical_value: PORTAL, canonical_label: "Supplier portal", sort_order: 3, is_active: true}
+      - {tenant_id: TEN002, domain: CAPTURE_CHANNEL, source_value: "MANUAL",       canonical_value: MANUAL,  canonical_label: "Manual entry",  sort_order: 4, is_active: true}
+      - {tenant_id: TEN003, domain: CAPTURE_CHANNEL, source_value: "CXML",    canonical_value: EDI,          canonical_label: "EDI",           sort_order: 1, is_active: true}
+      - {tenant_id: TEN003, domain: CAPTURE_CHANNEL, source_value: "PORTAL",  canonical_value: PORTAL,       canonical_label: "Supplier portal", sort_order: 3, is_active: true}
+      - {tenant_id: TEN003, domain: CAPTURE_CHANNEL, source_value: "EMAIL",   canonical_value: OCR,          canonical_label: "OCR/Email",     sort_order: 2, is_active: true}
+      - {tenant_id: TEN003, domain: CAPTURE_CHANNEL, source_value: "UNKNOWN", canonical_value: UNKNOWN,      canonical_label: "Unknown",       sort_order: 9, is_active: true}
+
+      # --- BLOCK_REASON ---
+      - {tenant_id: TEN001, domain: BLOCK_REASON, source_value: "A", canonical_value: PRICE_VARIANCE,    canonical_label: "Price variance",    sort_order: 1, is_active: true}
+      - {tenant_id: TEN001, domain: BLOCK_REASON, source_value: "M", canonical_value: QUANTITY_VARIANCE, canonical_label: "Quantity variance", sort_order: 2, is_active: true}
+      - {tenant_id: TEN001, domain: BLOCK_REASON, source_value: "R", canonical_value: MANUAL_HOLD,       canonical_label: "Manual hold",       sort_order: 3, is_active: true}
+      - {tenant_id: TEN002, domain: BLOCK_REASON, source_value: "HOLD", canonical_value: MANUAL_HOLD,    canonical_label: "Manual hold",       sort_order: 3, is_active: true}
+      - {tenant_id: TEN003, domain: BLOCK_REASON, source_value: "HOLD", canonical_value: MANUAL_HOLD,    canonical_label: "Manual hold",       sort_order: 3, is_active: true}

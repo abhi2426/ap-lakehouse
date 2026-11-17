@@ -1,0 +1,358 @@
+# =============================================================================
+# schema_mapping_po_payment.yaml — the purchasing and disbursement half of the
+# mapping set. Same target table, same contract, same loader as
+# schema_mapping.yaml; split only so that each file stays reviewable.
+#
+# Entities here: po_header, po_line, po_history, payment_header,
+# payment_application, approval_event, invoice_distribution.
+#
+# Read these three things down the tenants and the case for config-driven
+# ingestion makes itself:
+#
+#   canonical po_number     -> EBELN          | SEGMENT1        | po-number
+#   canonical receipt grain -> EBELN+EBELP+.. | TRANSACTION_ID  | receipt-id
+#   canonical payment id    -> ZBUKR+LAUFD+.. | CHECK_ID        | payment-id
+#
+# TEN001's keys are composite and positional; TEN002's are surrogate integers;
+# TEN003's are natural business strings. The canonical model takes the business
+# meaning and leaves the source key shape in bronze, where it belongs.
+#
+# Notes that matter downstream:
+#  * TEN001 po_history (EKBE) is an append-only movement log: goods receipts and
+#    invoice receipts share the table and are told apart by VGABE. Only VGABE='1'
+#    is a goods movement. Filtering this wrongly double-counts the GR/IR position.
+#  * TEN002 carries the distribution grain (trap 4). Aggregating invoice value at
+#    the distribution grain when lines already carry it double-counts; decision
+#    D11 fixes the grain per metric.
+#  * TEN003 has no approval stream and no distribution grain at all. There is no
+#    mapping block for them here, and that absence is the whole point: silver
+#    must produce a defensible metric for a tenant whose source cannot answer.
+# =============================================================================
+
+target_table: ap_control.config.schema_mapping
+key_columns: [mapping_id]
+derive_key: "{tenant_id}__{entity}__{canonical_field}"
+
+blocks:
+
+  # ===========================================================================
+  # PO HEADER
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: po_header, is_active: true}
+    rows:
+      - {source_field: EBELN, source_datatype: STRING, canonical_field: po_number,         canonical_datatype: "STRING", transform_expr: "upper(trim(EBELN))", is_mandatory: true,  is_primary_key: true,  is_sensitive: false, ordinal: 0}
+      - {source_field: LIFNR, source_datatype: STRING, canonical_field: vendor_id,         canonical_datatype: "STRING", transform_expr: "upper(trim(LIFNR))", is_mandatory: true,  is_primary_key: false, is_sensitive: false, ordinal: 1}
+      - {source_field: BUKRS, source_datatype: STRING, canonical_field: company_code,      canonical_datatype: "STRING", transform_expr: "upper(trim(BUKRS))", is_mandatory: true,  is_primary_key: false, is_sensitive: false, ordinal: 2}
+      - {source_field: BEDAT, source_datatype: STRING, canonical_field: po_date,           canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(BEDAT),'yyyyMMdd')", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 3}
+      - {source_field: WAERS, source_datatype: STRING, canonical_field: currency,          canonical_datatype: "STRING", transform_expr: "upper(trim(WAERS))", is_mandatory: true,  is_primary_key: false, is_sensitive: false, ordinal: 4}
+      - {source_field: EKGRP, source_datatype: STRING, canonical_field: buyer,             canonical_datatype: "STRING", transform_expr: "upper(trim(EKGRP))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 5}
+      - {source_field: BSART, source_datatype: STRING, canonical_field: po_type_src,       canonical_datatype: "STRING", transform_expr: "upper(trim(BSART))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 6}
+      - {source_field: ZTERM, source_datatype: STRING, canonical_field: payment_terms_src, canonical_datatype: "STRING", transform_expr: "upper(trim(ZTERM))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 7}
+      - {source_field: ERNAM, source_datatype: STRING, canonical_field: created_by,        canonical_datatype: "STRING", transform_expr: "upper(trim(ERNAM))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 8}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: po_header, is_active: true}
+    rows:
+      # SEGMENT1 is the number a buyer would recognise; PO_HEADER_ID is the join key
+      # every child table actually carries. Both are kept: one for humans, one for joins.
+      - {source_field: SEGMENT1,          source_datatype: STRING, canonical_field: po_number,         canonical_datatype: "STRING", transform_expr: "upper(trim(SEGMENT1))", is_mandatory: true,  is_primary_key: true,  is_sensitive: false}
+      - {source_field: PO_HEADER_ID,      source_datatype: STRING, canonical_field: po_source_key,     canonical_datatype: "STRING", transform_expr: "trim(PO_HEADER_ID)", is_mandatory: true,  is_primary_key: false, is_sensitive: false}
+      - {source_field: VENDOR_ID,         source_datatype: STRING, canonical_field: vendor_id,         canonical_datatype: "STRING", transform_expr: "upper(trim(VENDOR_ID))", is_mandatory: true,  is_primary_key: false, is_sensitive: false}
+      - {source_field: ORG_ID,            source_datatype: STRING, canonical_field: company_code,      canonical_datatype: "STRING", transform_expr: "upper(trim(ORG_ID))", is_mandatory: true,  is_primary_key: false, is_sensitive: false}
+      - {source_field: CREATION_DATE,     source_datatype: STRING, canonical_field: po_date,           canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(CREATION_DATE),1,10),'yyyy-MM-dd')", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: CURRENCY_CODE,     source_datatype: STRING, canonical_field: currency,          canonical_datatype: "STRING", transform_expr: "upper(trim(CURRENCY_CODE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: AGENT_ID,          source_datatype: STRING, canonical_field: buyer,             canonical_datatype: "STRING", transform_expr: "upper(trim(AGENT_ID))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: TYPE_LOOKUP_CODE,  source_datatype: STRING, canonical_field: po_type_src,       canonical_datatype: "STRING", transform_expr: "upper(trim(TYPE_LOOKUP_CODE))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: TERMS_NAME,        source_datatype: STRING, canonical_field: payment_terms_src, canonical_datatype: "STRING", transform_expr: "upper(trim(TERMS_NAME))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: CREATED_BY,        source_datatype: STRING, canonical_field: created_by,        canonical_datatype: "STRING", transform_expr: "upper(trim(CREATED_BY))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  - apply_to_all: {tenant_id: TEN003, source_system_id: TEN003_COUPA, entity: po_header, is_active: true}
+    rows:
+      # From day 15 this source renames `po-number` to `purchase-order-number`.
+      # The mapping deliberately does NOT coalesce the two: a breaking rename must
+      # halt the source and be fixed by a config change with an audit trail, not
+      # be silently absorbed by defensive SQL. Decision D9.
+      - {source_field: "po-number",      source_datatype: STRING, canonical_field: po_number,         canonical_datatype: "STRING", transform_expr: "upper(trim(`po-number`))", is_mandatory: true,  is_primary_key: true,  is_sensitive: false}
+      - {source_field: "supplier-number",source_datatype: STRING, canonical_field: vendor_id,         canonical_datatype: "STRING", transform_expr: "upper(trim(`supplier-number`))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: company_code,      canonical_datatype: "STRING", transform_expr: "'MER01'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "MER01"}
+      - {source_field: "po-date",        source_datatype: STRING, canonical_field: po_date,           canonical_datatype: "DATE",   transform_expr: "coalesce(try_to_date(substr(trim(`po-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`po-date`),'dd/MM/yyyy'))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "currency",       source_datatype: STRING, canonical_field: currency,          canonical_datatype: "STRING", transform_expr: "upper(coalesce(nullif(trim(currency),''),'AUD'))", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "AUD"}
+      - {source_field: "buyer",          source_datatype: STRING, canonical_field: buyer,             canonical_datatype: "STRING", transform_expr: "upper(trim(buyer))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "po-type",        source_datatype: STRING, canonical_field: po_type_src,       canonical_datatype: "STRING", transform_expr: "upper(trim(`po-type`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "payment-terms",  source_datatype: STRING, canonical_field: payment_terms_src, canonical_datatype: "STRING", transform_expr: "upper(trim(`payment-terms`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "created-by",     source_datatype: STRING, canonical_field: created_by,        canonical_datatype: "STRING", transform_expr: "upper(trim(`created-by`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  # ===========================================================================
+  # PO LINE
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: po_line, is_active: true}
+    rows:
+      - {source_field: EBELN, source_datatype: STRING, canonical_field: po_number,      canonical_datatype: "STRING", transform_expr: "upper(trim(EBELN))", is_mandatory: true,  is_primary_key: true,  is_sensitive: false, ordinal: 0}
+      - {source_field: EBELP, source_datatype: STRING, canonical_field: po_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(EBELP) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 1}
+      - {source_field: TXZ01, source_datatype: STRING, canonical_field: description,    canonical_datatype: "STRING", transform_expr: "trim(TXZ01)", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 2}
+      - {source_field: MENGE, source_datatype: STRING, canonical_field: quantity,       canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(MENGE) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(MENGE) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(MENGE),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(MENGE),'[^0-9.\\-]','') END AS DECIMAL(18,3))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 3}
+      - {source_field: MEINS, source_datatype: STRING, canonical_field: uom_src,        canonical_datatype: "STRING", transform_expr: "upper(trim(MEINS))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 4}
+      - {source_field: NETPR, source_datatype: STRING, canonical_field: unit_price,     canonical_datatype: "DECIMAL(18,4)", transform_expr: "try_cast(CASE WHEN trim(NETPR) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(NETPR) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(NETPR),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(NETPR),'[^0-9.\\-]','') END AS DECIMAL(18,4))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 5}
+      - {source_field: NETWR, source_datatype: STRING, canonical_field: net_value,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(NETWR) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(NETWR) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(NETWR),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(NETWR),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 6}
+      - {source_field: EINDT, source_datatype: STRING, canonical_field: delivery_date,  canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(EINDT),'yyyyMMdd')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 7}
+      - {source_field: SAKTO, source_datatype: STRING, canonical_field: gl_account,     canonical_datatype: "STRING", transform_expr: "lpad(nullif(trim(SAKTO),''),10,'0')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 8}
+      - {source_field: KOSTL, source_datatype: STRING, canonical_field: cost_center,    canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(KOSTL)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 9}
+      - {source_field: MWSKZ, source_datatype: STRING, canonical_field: tax_code_src,   canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(MWSKZ)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 10}
+      # PSTYP='9' is a service item: no goods receipt will ever exist for it, so the
+      # three-way match must degrade to a two-way match. Getting this wrong produces
+      # a permanent backlog of "unmatched" service invoices.
+      - {source_field: PSTYP, source_datatype: STRING, canonical_field: is_service,     canonical_datatype: "BOOLEAN", transform_expr: "coalesce(trim(PSTYP),'') = '9'", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 11}
+      - {source_field: WAERS, source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(trim(WAERS))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 12}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: po_line, is_active: true}
+    rows:
+      - {source_field: SEGMENT1,                  source_datatype: STRING, canonical_field: po_number,      canonical_datatype: "STRING", transform_expr: "upper(trim(SEGMENT1))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: LINE_NUM,                  source_datatype: STRING, canonical_field: po_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(LINE_NUM) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: PO_LINE_ID,                source_datatype: STRING, canonical_field: po_line_source_key, canonical_datatype: "STRING", transform_expr: "trim(PO_LINE_ID)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: ITEM_DESCRIPTION,          source_datatype: STRING, canonical_field: description,    canonical_datatype: "STRING", transform_expr: "trim(ITEM_DESCRIPTION)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: QUANTITY,                  source_datatype: STRING, canonical_field: quantity,       canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(QUANTITY) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(QUANTITY) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(QUANTITY),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(QUANTITY),'[^0-9.\\-]','') END AS DECIMAL(18,3))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: UNIT_MEAS_LOOKUP_CODE,     source_datatype: STRING, canonical_field: uom_src,        canonical_datatype: "STRING", transform_expr: "upper(trim(UNIT_MEAS_LOOKUP_CODE))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: UNIT_PRICE,                source_datatype: STRING, canonical_field: unit_price,     canonical_datatype: "DECIMAL(18,4)", transform_expr: "try_cast(CASE WHEN trim(UNIT_PRICE) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(UNIT_PRICE) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(UNIT_PRICE),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(UNIT_PRICE),'[^0-9.\\-]','') END AS DECIMAL(18,4))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: AMOUNT,                    source_datatype: STRING, canonical_field: net_value,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(AMOUNT),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(AMOUNT),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: NEED_BY_DATE,              source_datatype: STRING, canonical_field: delivery_date,  canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(NEED_BY_DATE),1,10),'yyyy-MM-dd')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: GL_ACCOUNT_SEGMENT,        source_datatype: STRING, canonical_field: gl_account,     canonical_datatype: "STRING", transform_expr: "lpad(nullif(trim(GL_ACCOUNT_SEGMENT),''),10,'0')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: COST_CENTER_SEGMENT,       source_datatype: STRING, canonical_field: cost_center,    canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(COST_CENTER_SEGMENT)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: TAX_CLASSIFICATION_CODE,   source_datatype: STRING, canonical_field: tax_code_src,   canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(TAX_CLASSIFICATION_CODE)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: ORDER_TYPE_LOOKUP_CODE,    source_datatype: STRING, canonical_field: is_service,     canonical_datatype: "BOOLEAN", transform_expr: "upper(coalesce(trim(ORDER_TYPE_LOOKUP_CODE),'')) IN ('RATE','FIXED PRICE')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: CURRENCY_CODE,             source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(trim(CURRENCY_CODE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+
+  - apply_to_all: {tenant_id: TEN003, source_system_id: TEN003_COUPA, entity: po_line, is_active: true}
+    rows:
+      - {source_field: "po-number",    source_datatype: STRING, canonical_field: po_number,      canonical_datatype: "STRING", transform_expr: "upper(trim(`po-number`))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: "line-num",     source_datatype: STRING, canonical_field: po_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(`line-num`) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: "description",  source_datatype: STRING, canonical_field: description,    canonical_datatype: "STRING", transform_expr: "regexp_replace(trim(description),'\\\\s+',' ')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "quantity",     source_datatype: STRING, canonical_field: quantity,       canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(quantity) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(quantity) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(quantity),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(quantity),'[^0-9.\\-]','') END AS DECIMAL(18,3))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "uom",          source_datatype: STRING, canonical_field: uom_src,        canonical_datatype: "STRING", transform_expr: "upper(trim(uom))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "unit-price",   source_datatype: STRING, canonical_field: unit_price,     canonical_datatype: "DECIMAL(18,4)", transform_expr: "try_cast(CASE WHEN trim(`unit-price`) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(`unit-price`) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(`unit-price`),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(`unit-price`),'[^0-9.\\-]','') END AS DECIMAL(18,4))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "line-total",   source_datatype: STRING, canonical_field: net_value,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(`line-total`) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(`line-total`) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(`line-total`),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(`line-total`),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "need-by-date", source_datatype: STRING, canonical_field: delivery_date,  canonical_datatype: "DATE",   transform_expr: "coalesce(try_to_date(substr(trim(`need-by-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`need-by-date`),'dd/MM/yyyy'))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "account",      source_datatype: STRING, canonical_field: gl_account,     canonical_datatype: "STRING", transform_expr: "lpad(nullif(split(trim(account),'-')[0],''),10,'0')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "account",      source_datatype: STRING, canonical_field: cost_center,    canonical_datatype: "STRING", transform_expr: "nullif(upper(split(trim(account),'-')[1]),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "tax-code",     source_datatype: STRING, canonical_field: tax_code_src,   canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(`tax-code`)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      # A services tenant: most lines have no receivable goods. Derived from the UOM
+      # rather than a flag, because the source has no flag.
+      - {source_field: "uom",          source_datatype: STRING, canonical_field: is_service,     canonical_datatype: "BOOLEAN", transform_expr: "upper(trim(uom)) IN ('HR','DAY','MTH','JOB')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,           source_datatype: null,   canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "'AUD'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "AUD"}
+
+  # ===========================================================================
+  # PO HISTORY / GOODS RECEIPTS
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: po_history, is_active: true}
+    rows:
+      - {source_field: EBELN, source_datatype: STRING, canonical_field: po_number,       canonical_datatype: "STRING", transform_expr: "upper(trim(EBELN))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 0}
+      - {source_field: EBELP, source_datatype: STRING, canonical_field: po_line_number,  canonical_datatype: "INT",    transform_expr: "try_cast(trim(EBELP) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 1}
+      - {source_field: ZEKKN, source_datatype: STRING, canonical_field: account_assignment, canonical_datatype: "STRING", transform_expr: "trim(ZEKKN)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 2}
+      # VGABE is the movement class: 1 = goods receipt, 2 = invoice receipt,
+      # 3 = down payment. Only 1 belongs in the GR side of the GR/IR position.
+      - {source_field: VGABE, source_datatype: STRING, canonical_field: movement_class,  canonical_datatype: "STRING", transform_expr: "trim(VGABE)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 3}
+      - {source_field: GJAHR, source_datatype: STRING, canonical_field: fiscal_year,     canonical_datatype: "INT",    transform_expr: "try_cast(trim(GJAHR) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 4}
+      - {source_field: BELNR, source_datatype: STRING, canonical_field: receipt_doc_id,  canonical_datatype: "STRING", transform_expr: "trim(BELNR)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 5}
+      - {source_field: BUZEI, source_datatype: STRING, canonical_field: receipt_line,    canonical_datatype: "INT",    transform_expr: "try_cast(trim(BUZEI) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 6}
+      - {source_field: BWART, source_datatype: STRING, canonical_field: movement_type,   canonical_datatype: "STRING", transform_expr: "trim(BWART)", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 7}
+      - {source_field: BUDAT, source_datatype: STRING, canonical_field: receipt_date,    canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(BUDAT),'yyyyMMdd')", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 8}
+      # A reversal (BWART 102/122) carries SHKZG='H' and must be subtracted. Summing
+      # MENGE without it inflates received quantity and hides over-receipts.
+      - {source_field: MENGE, source_datatype: STRING, canonical_field: quantity,        canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(MENGE) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(MENGE) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(MENGE),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(MENGE),'[^0-9.\\-]','') END AS DECIMAL(18,3)) * CASE WHEN upper(trim(SHKZG))='H' THEN -1 ELSE 1 END", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 9}
+      - {source_field: MEINS, source_datatype: STRING, canonical_field: uom_src,         canonical_datatype: "STRING", transform_expr: "upper(trim(MEINS))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 10}
+      - {source_field: DMBTR, source_datatype: STRING, canonical_field: amount,          canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(DMBTR) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(DMBTR) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(DMBTR),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(DMBTR),'[^0-9.\\-]','') END AS DECIMAL(18,2)) * CASE WHEN upper(trim(SHKZG))='H' THEN -1 ELSE 1 END", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 11}
+      - {source_field: WAERS, source_datatype: STRING, canonical_field: currency,        canonical_datatype: "STRING", transform_expr: "upper(trim(WAERS))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 12}
+      - {source_field: ERNAM, source_datatype: STRING, canonical_field: posted_by,       canonical_datatype: "STRING", transform_expr: "upper(trim(ERNAM))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 13}
+      - {source_field: SHKZG, source_datatype: STRING, canonical_field: debit_credit_ind, canonical_datatype: "STRING", transform_expr: "upper(trim(SHKZG))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 14}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: po_history, is_active: true}
+    rows:
+      - {source_field: TRANSACTION_ID,        source_datatype: STRING, canonical_field: receipt_doc_id, canonical_datatype: "STRING", transform_expr: "trim(TRANSACTION_ID)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: null,                  source_datatype: null,   canonical_field: receipt_line,   canonical_datatype: "INT",    transform_expr: "1", is_mandatory: true, is_primary_key: true, is_sensitive: false, default_value: "1"}
+      - {source_field: SEGMENT1,              source_datatype: STRING, canonical_field: po_number,      canonical_datatype: "STRING", transform_expr: "upper(trim(SEGMENT1))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: PO_LINE_NUMBER,        source_datatype: STRING, canonical_field: po_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(PO_LINE_NUMBER) AS INT)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      # RECEIVE / RETURN TO VENDOR / CORRECT: the sign lives in the type, not the qty.
+      - {source_field: TRANSACTION_TYPE,      source_datatype: STRING, canonical_field: movement_type,  canonical_datatype: "STRING", transform_expr: "upper(trim(TRANSACTION_TYPE))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,                  source_datatype: null,   canonical_field: movement_class, canonical_datatype: "STRING", transform_expr: "'1'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "1"}
+      - {source_field: TRANSACTION_DATE,      source_datatype: STRING, canonical_field: receipt_date,   canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(TRANSACTION_DATE),1,10),'yyyy-MM-dd')", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: QUANTITY,              source_datatype: STRING, canonical_field: quantity,       canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(QUANTITY) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(QUANTITY) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(QUANTITY),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(QUANTITY),'[^0-9.\\-]','') END AS DECIMAL(18,3)) * CASE WHEN upper(trim(TRANSACTION_TYPE)) IN ('RETURN TO VENDOR','CORRECT-NEGATIVE') THEN -1 ELSE 1 END", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: UNIT_OF_MEASURE,       source_datatype: STRING, canonical_field: uom_src,        canonical_datatype: "STRING", transform_expr: "upper(trim(UNIT_OF_MEASURE))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: AMOUNT,                source_datatype: STRING, canonical_field: amount,         canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(AMOUNT),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(AMOUNT),'[^0-9.\\-]','') END AS DECIMAL(18,2)) * CASE WHEN upper(trim(TRANSACTION_TYPE)) IN ('RETURN TO VENDOR','CORRECT-NEGATIVE') THEN -1 ELSE 1 END", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: CURRENCY_CODE,         source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(trim(CURRENCY_CODE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: CREATED_BY,            source_datatype: STRING, canonical_field: posted_by,      canonical_datatype: "STRING", transform_expr: "upper(trim(CREATED_BY))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,                  source_datatype: null,   canonical_field: account_assignment, canonical_datatype: "STRING", transform_expr: "'00'", is_mandatory: false, is_primary_key: false, is_sensitive: false, default_value: "00"}
+      - {source_field: TRANSACTION_TYPE,      source_datatype: STRING, canonical_field: debit_credit_ind, canonical_datatype: "STRING", transform_expr: "CASE WHEN upper(trim(TRANSACTION_TYPE)) IN ('RETURN TO VENDOR','CORRECT-NEGATIVE') THEN 'H' ELSE 'S' END", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: TRANSACTION_DATE,      source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT",    transform_expr: "year(try_to_date(substr(trim(TRANSACTION_DATE),1,10),'yyyy-MM-dd'))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+
+  - apply_to_all: {tenant_id: TEN003, source_system_id: TEN003_COUPA, entity: po_history, is_active: true}
+    rows:
+      - {source_field: "receipt-id",     source_datatype: STRING, canonical_field: receipt_doc_id, canonical_datatype: "STRING", transform_expr: "upper(trim(`receipt-id`))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: receipt_line,   canonical_datatype: "INT",    transform_expr: "1", is_mandatory: true, is_primary_key: true, is_sensitive: false, default_value: "1"}
+      - {source_field: "po-number",      source_datatype: STRING, canonical_field: po_number,      canonical_datatype: "STRING", transform_expr: "upper(trim(`po-number`))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "po-line-num",    source_datatype: STRING, canonical_field: po_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(`po-line-num`) AS INT)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "receipt-date",   source_datatype: STRING, canonical_field: receipt_date,   canonical_datatype: "DATE",   transform_expr: "coalesce(try_to_date(substr(trim(`receipt-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`receipt-date`),'dd/MM/yyyy'))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "quantity",       source_datatype: STRING, canonical_field: quantity,       canonical_datatype: "DECIMAL(18,3)", transform_expr: "try_cast(CASE WHEN trim(quantity) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(quantity) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(quantity),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(quantity),'[^0-9.\\-]','') END AS DECIMAL(18,3))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "uom",            source_datatype: STRING, canonical_field: uom_src,        canonical_datatype: "STRING", transform_expr: "upper(trim(uom))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "receipt-value",  source_datatype: STRING, canonical_field: amount,         canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(`receipt-value`) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(`receipt-value`) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(`receipt-value`),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(`receipt-value`),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "currency",       source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(coalesce(nullif(trim(currency),''),'AUD'))", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "AUD"}
+      - {source_field: "received-by",    source_datatype: STRING, canonical_field: posted_by,      canonical_datatype: "STRING", transform_expr: "upper(trim(`received-by`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: movement_class, canonical_datatype: "STRING", transform_expr: "'1'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "1"}
+      - {source_field: null,             source_datatype: null,   canonical_field: movement_type,  canonical_datatype: "STRING", transform_expr: "'RECEIPT'", is_mandatory: false, is_primary_key: false, is_sensitive: false, default_value: "RECEIPT"}
+      - {source_field: null,             source_datatype: null,   canonical_field: account_assignment, canonical_datatype: "STRING", transform_expr: "'00'", is_mandatory: false, is_primary_key: false, is_sensitive: false, default_value: "00"}
+      # TEN003 cannot express a reversal at all: a cancelled receipt is deleted in
+      # the source and simply stops appearing. Declared constant so the metric is
+      # honest rather than absent, and flagged in the Step 6 control register.
+      - {source_field: null,             source_datatype: null,   canonical_field: debit_credit_ind, canonical_datatype: "STRING", transform_expr: "'S'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "S"}
+      - {source_field: "receipt-date",   source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT", transform_expr: "CASE WHEN month(coalesce(try_to_date(substr(trim(`receipt-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`receipt-date`),'dd/MM/yyyy'))) >= 7 THEN year(coalesce(try_to_date(substr(trim(`receipt-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`receipt-date`),'dd/MM/yyyy'))) + 1 ELSE year(coalesce(try_to_date(substr(trim(`receipt-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`receipt-date`),'dd/MM/yyyy'))) END", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+
+  # ===========================================================================
+  # PAYMENT HEADER
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: payment_header, is_active: true}
+    rows:
+      # The SAP payment key is the payment RUN plus the document: same document
+      # number can legitimately recur across runs and company codes.
+      - {source_field: ZBUKR, source_datatype: STRING, canonical_field: company_code,    canonical_datatype: "STRING", transform_expr: "upper(trim(ZBUKR))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 0}
+      - {source_field: LAUFD, source_datatype: STRING, canonical_field: run_date,        canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(LAUFD),'yyyyMMdd')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 1}
+      - {source_field: LAUFI, source_datatype: STRING, canonical_field: run_id,          canonical_datatype: "STRING", transform_expr: "upper(trim(LAUFI))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 2}
+      - {source_field: VBLNR, source_datatype: STRING, canonical_field: payment_doc_id,  canonical_datatype: "STRING", transform_expr: "lpad(trim(VBLNR),10,'0')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 3}
+      - {source_field: GJAHR, source_datatype: STRING, canonical_field: fiscal_year,     canonical_datatype: "INT",    transform_expr: "try_cast(trim(GJAHR) AS INT)", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 4}
+      - {source_field: LIFNR, source_datatype: STRING, canonical_field: vendor_id,       canonical_datatype: "STRING", transform_expr: "upper(trim(LIFNR))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 5}
+      - {source_field: ZALDT, source_datatype: STRING, canonical_field: payment_date,    canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(ZALDT),'yyyyMMdd')", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 6}
+      - {source_field: RWBTR, source_datatype: STRING, canonical_field: payment_amount,  canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(RWBTR) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(RWBTR) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(RWBTR),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(RWBTR),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 7}
+      - {source_field: WAERS, source_datatype: STRING, canonical_field: currency,        canonical_datatype: "STRING", transform_expr: "upper(trim(WAERS))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 8}
+      - {source_field: RZAWE, source_datatype: STRING, canonical_field: payment_method_src, canonical_datatype: "STRING", transform_expr: "upper(trim(RZAWE))", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 9}
+      # XVORL='X' marks a payment PROPOSAL, not a payment. Counting proposals as
+      # payments is a classic way to overstate disbursement.
+      - {source_field: XVORL, source_datatype: STRING, canonical_field: is_proposal,     canonical_datatype: "BOOLEAN", transform_expr: "coalesce(trim(XVORL),'') IN ('X','x')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 10}
+      - {source_field: VOID_FLAG, source_datatype: STRING, canonical_field: is_void,     canonical_datatype: "BOOLEAN", transform_expr: "coalesce(trim(VOID_FLAG),'') IN ('X','x','Y')", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 11}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: payment_header, is_active: true}
+    rows:
+      - {source_field: ORG_ID,               source_datatype: STRING, canonical_field: company_code,   canonical_datatype: "STRING", transform_expr: "upper(trim(ORG_ID))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: CHECK_ID,             source_datatype: STRING, canonical_field: payment_doc_id, canonical_datatype: "STRING", transform_expr: "trim(CHECK_ID)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: CHECK_DATE,           source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT",    transform_expr: "year(try_to_date(substr(trim(CHECK_DATE),1,10),'yyyy-MM-dd'))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: CHECK_NUMBER,         source_datatype: STRING, canonical_field: payment_reference, canonical_datatype: "STRING", transform_expr: "trim(CHECK_NUMBER)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: VENDOR_ID,            source_datatype: STRING, canonical_field: vendor_id,      canonical_datatype: "STRING", transform_expr: "upper(trim(VENDOR_ID))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: CHECK_DATE,           source_datatype: STRING, canonical_field: payment_date,   canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(CHECK_DATE),1,10),'yyyy-MM-dd')", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: AMOUNT,               source_datatype: STRING, canonical_field: payment_amount, canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(AMOUNT),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(AMOUNT),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: CURRENCY_CODE,        source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(trim(CURRENCY_CODE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: PAYMENT_METHOD_CODE,  source_datatype: STRING, canonical_field: payment_method_src, canonical_datatype: "STRING", transform_expr: "upper(trim(PAYMENT_METHOD_CODE))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: PAYMENT_BATCH_ID,     source_datatype: STRING, canonical_field: run_id,         canonical_datatype: "STRING", transform_expr: "upper(trim(PAYMENT_BATCH_ID))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: CHECK_DATE,           source_datatype: STRING, canonical_field: run_date,       canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(CHECK_DATE),1,10),'yyyy-MM-dd')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      # Oracle expresses a void as a DATE, not a flag. A non-null void date means
+      # the cash never moved, even though the row still carries a full amount.
+      - {source_field: VOID_DATE,            source_datatype: STRING, canonical_field: is_void,        canonical_datatype: "BOOLEAN", transform_expr: "nullif(trim(VOID_DATE),'') IS NOT NULL", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,                 source_datatype: null,   canonical_field: is_proposal,    canonical_datatype: "BOOLEAN", transform_expr: "CAST(false AS BOOLEAN)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  - apply_to_all: {tenant_id: TEN003, source_system_id: TEN003_COUPA, entity: payment_header, is_active: true}
+    rows:
+      - {source_field: null,              source_datatype: null,   canonical_field: company_code,   canonical_datatype: "STRING", transform_expr: "'MER01'", is_mandatory: true, is_primary_key: true, is_sensitive: false, default_value: "MER01"}
+      - {source_field: "payment-id",      source_datatype: STRING, canonical_field: payment_doc_id, canonical_datatype: "STRING", transform_expr: "upper(trim(`payment-id`))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: "payment-date",    source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT", transform_expr: "CASE WHEN month(coalesce(try_to_date(substr(trim(`payment-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`payment-date`),'dd/MM/yyyy'))) >= 7 THEN year(coalesce(try_to_date(substr(trim(`payment-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`payment-date`),'dd/MM/yyyy'))) + 1 ELSE year(coalesce(try_to_date(substr(trim(`payment-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`payment-date`),'dd/MM/yyyy'))) END", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: "supplier-number", source_datatype: STRING, canonical_field: vendor_id,      canonical_datatype: "STRING", transform_expr: "upper(trim(`supplier-number`))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "payment-date",    source_datatype: STRING, canonical_field: payment_date,   canonical_datatype: "DATE", transform_expr: "coalesce(try_to_date(substr(trim(`payment-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`payment-date`),'dd/MM/yyyy'))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "amount",          source_datatype: STRING, canonical_field: payment_amount, canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(amount) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(amount) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(amount),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(amount),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "currency",        source_datatype: STRING, canonical_field: currency,       canonical_datatype: "STRING", transform_expr: "upper(coalesce(nullif(trim(currency),''),'AUD'))", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "AUD"}
+      - {source_field: "payment-method",  source_datatype: STRING, canonical_field: payment_method_src, canonical_datatype: "STRING", transform_expr: "upper(trim(`payment-method`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "batch-id",        source_datatype: STRING, canonical_field: run_id,         canonical_datatype: "STRING", transform_expr: "upper(trim(`batch-id`))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "payment-date",    source_datatype: STRING, canonical_field: run_date,       canonical_datatype: "DATE", transform_expr: "coalesce(try_to_date(substr(trim(`payment-date`),1,10),'yyyy-MM-dd'), try_to_date(trim(`payment-date`),'dd/MM/yyyy'))", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "status",          source_datatype: STRING, canonical_field: is_void,        canonical_datatype: "BOOLEAN", transform_expr: "lower(coalesce(trim(status),'')) IN ('void','cancelled','reversed')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,              source_datatype: null,   canonical_field: is_proposal,    canonical_datatype: "BOOLEAN", transform_expr: "CAST(false AS BOOLEAN)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  # ===========================================================================
+  # PAYMENT APPLICATION — the grain that makes DPO and early-payment analysis
+  # possible. A payment with no application row is cash that cannot be explained.
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: payment_application, is_active: true}
+    rows:
+      - {source_field: ZBUKR, source_datatype: STRING, canonical_field: company_code,        canonical_datatype: "STRING", transform_expr: "upper(trim(ZBUKR))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 0}
+      - {source_field: LAUFD, source_datatype: STRING, canonical_field: run_date,            canonical_datatype: "DATE",   transform_expr: "try_to_date(trim(LAUFD),'yyyyMMdd')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 1}
+      - {source_field: LAUFI, source_datatype: STRING, canonical_field: run_id,              canonical_datatype: "STRING", transform_expr: "upper(trim(LAUFI))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 2}
+      - {source_field: VBLNR, source_datatype: STRING, canonical_field: payment_doc_id,      canonical_datatype: "STRING", transform_expr: "lpad(trim(VBLNR),10,'0')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 3}
+      - {source_field: BUKRS, source_datatype: STRING, canonical_field: invoice_company_code, canonical_datatype: "STRING", transform_expr: "upper(trim(BUKRS))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 4}
+      - {source_field: BELNR, source_datatype: STRING, canonical_field: invoice_doc_id,      canonical_datatype: "STRING", transform_expr: "lpad(trim(BELNR),10,'0')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 5}
+      - {source_field: GJAHR, source_datatype: STRING, canonical_field: invoice_fiscal_year, canonical_datatype: "INT",    transform_expr: "try_cast(trim(GJAHR) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 6}
+      - {source_field: BUZEI, source_datatype: STRING, canonical_field: invoice_line_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(BUZEI) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 7}
+      - {source_field: WRBTR, source_datatype: STRING, canonical_field: applied_amount,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(WRBTR) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(WRBTR) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(WRBTR),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(WRBTR),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 8}
+      - {source_field: SKNTO, source_datatype: STRING, canonical_field: discount_taken,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "coalesce(try_cast(CASE WHEN trim(SKNTO) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(SKNTO) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(SKNTO),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(SKNTO),'[^0-9.\\-]','') END AS DECIMAL(18,2)), 0)", is_mandatory: false, is_primary_key: false, is_sensitive: false, ordinal: 9}
+      - {source_field: WAERS, source_datatype: STRING, canonical_field: currency,            canonical_datatype: "STRING", transform_expr: "upper(trim(WAERS))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 10}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: payment_application, is_active: true}
+    rows:
+      - {source_field: ORG_ID,              source_datatype: STRING, canonical_field: company_code,        canonical_datatype: "STRING", transform_expr: "upper(trim(ORG_ID))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: INVOICE_PAYMENT_ID,  source_datatype: STRING, canonical_field: application_id,      canonical_datatype: "STRING", transform_expr: "trim(INVOICE_PAYMENT_ID)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: CHECK_ID,            source_datatype: STRING, canonical_field: payment_doc_id,      canonical_datatype: "STRING", transform_expr: "trim(CHECK_ID)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: INVOICE_ID,          source_datatype: STRING, canonical_field: invoice_doc_id,      canonical_datatype: "STRING", transform_expr: "trim(INVOICE_ID)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: ORG_ID,              source_datatype: STRING, canonical_field: invoice_company_code, canonical_datatype: "STRING", transform_expr: "upper(trim(ORG_ID))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: ACCOUNTING_DATE,     source_datatype: STRING, canonical_field: invoice_fiscal_year, canonical_datatype: "INT",    transform_expr: "year(try_to_date(substr(trim(ACCOUNTING_DATE),1,10),'yyyy-MM-dd'))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      # Oracle applies at the invoice, not the invoice line. Declared as line 0 so
+      # the canonical grain is uniform and the difference stays visible.
+      - {source_field: null,                source_datatype: null,   canonical_field: invoice_line_number, canonical_datatype: "INT",    transform_expr: "0", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "0"}
+      - {source_field: AMOUNT,              source_datatype: STRING, canonical_field: applied_amount,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(AMOUNT),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(AMOUNT),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: DISCOUNT_TAKEN,      source_datatype: STRING, canonical_field: discount_taken,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "coalesce(try_cast(CASE WHEN trim(DISCOUNT_TAKEN) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(DISCOUNT_TAKEN) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(DISCOUNT_TAKEN),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(DISCOUNT_TAKEN),'[^0-9.\\-]','') END AS DECIMAL(18,2)), 0)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: CURRENCY_CODE,       source_datatype: STRING, canonical_field: currency,            canonical_datatype: "STRING", transform_expr: "upper(trim(CURRENCY_CODE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: ACCOUNTING_DATE,     source_datatype: STRING, canonical_field: run_date,            canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(ACCOUNTING_DATE),1,10),'yyyy-MM-dd')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,                source_datatype: null,   canonical_field: run_id,              canonical_datatype: "STRING", transform_expr: "CAST(NULL AS STRING)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  - apply_to_all: {tenant_id: TEN003, source_system_id: TEN003_COUPA, entity: payment_application, is_active: true}
+    rows:
+      - {source_field: null,             source_datatype: null,   canonical_field: company_code,        canonical_datatype: "STRING", transform_expr: "'MER01'", is_mandatory: true, is_primary_key: true, is_sensitive: false, default_value: "MER01"}
+      - {source_field: "payment-id",     source_datatype: STRING, canonical_field: payment_doc_id,      canonical_datatype: "STRING", transform_expr: "upper(trim(`payment-id`))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: "invoice-number", source_datatype: STRING, canonical_field: invoice_doc_id,      canonical_datatype: "STRING", transform_expr: "upper(trim(`invoice-number`))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: invoice_company_code, canonical_datatype: "STRING", transform_expr: "'MER01'", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "MER01"}
+      # The payment file carries no accounting date for the invoice, so the fiscal
+      # year has to be resolved by joining the invoice in silver. Declared null
+      # here rather than guessed: a wrong fiscal year silently breaks the PK join.
+      - {source_field: null,             source_datatype: null,   canonical_field: invoice_fiscal_year, canonical_datatype: "INT",    transform_expr: "CAST(NULL AS INT)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: invoice_line_number, canonical_datatype: "INT",    transform_expr: "0", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "0"}
+      - {source_field: "applied-amount", source_datatype: STRING, canonical_field: applied_amount,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(`applied-amount`) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(`applied-amount`) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(`applied-amount`),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(`applied-amount`),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: "discount-taken", source_datatype: STRING, canonical_field: discount_taken,      canonical_datatype: "DECIMAL(18,2)", transform_expr: "coalesce(try_cast(CASE WHEN trim(`discount-taken`) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(`discount-taken`) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(`discount-taken`),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(`discount-taken`),'[^0-9.\\-]','') END AS DECIMAL(18,2)), 0)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: "currency",       source_datatype: STRING, canonical_field: currency,            canonical_datatype: "STRING", transform_expr: "upper(coalesce(nullif(trim(currency),''),'AUD'))", is_mandatory: true, is_primary_key: false, is_sensitive: false, default_value: "AUD"}
+      - {source_field: null,             source_datatype: null,   canonical_field: run_date,            canonical_datatype: "DATE",   transform_expr: "CAST(NULL AS DATE)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: null,             source_datatype: null,   canonical_field: run_id,              canonical_datatype: "STRING", transform_expr: "CAST(NULL AS STRING)", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+
+  # ===========================================================================
+  # APPROVAL EVENT — TEN001 and TEN002 only. TEN003 has no such stream, which is
+  # why KPI 6.3 (approval cycle time) must be reported as NOT_AVAILABLE for it
+  # rather than as zero. Suppressing the distinction is how a dashboard lies.
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN001, source_system_id: TEN001_SAP_PRD, entity: approval_event, is_active: true}
+    rows:
+      - {source_field: BUKRS,      source_datatype: STRING, canonical_field: company_code,   canonical_datatype: "STRING",    transform_expr: "upper(trim(BUKRS))", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 0}
+      - {source_field: BELNR,      source_datatype: STRING, canonical_field: invoice_doc_id, canonical_datatype: "STRING",    transform_expr: "lpad(trim(BELNR),10,'0')", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 1}
+      - {source_field: GJAHR,      source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT",       transform_expr: "try_cast(trim(GJAHR) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 2}
+      - {source_field: EVENT_SEQ,  source_datatype: STRING, canonical_field: event_seq,      canonical_datatype: "INT",       transform_expr: "try_cast(trim(EVENT_SEQ) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false, ordinal: 3}
+      - {source_field: EVENT_TYPE, source_datatype: STRING, canonical_field: event_type,     canonical_datatype: "STRING",    transform_expr: "upper(trim(EVENT_TYPE))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 4}
+      - {source_field: ACTOR,      source_datatype: STRING, canonical_field: actor,          canonical_datatype: "STRING",    transform_expr: "upper(trim(ACTOR))", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 5}
+      - {source_field: EVENT_TS,   source_datatype: STRING, canonical_field: event_ts,       canonical_datatype: "TIMESTAMP", transform_expr: "try_to_timestamp(trim(EVENT_TS),'yyyyMMddHHmmss')", is_mandatory: true, is_primary_key: false, is_sensitive: false, ordinal: 6}
+      - {source_field: COMMENTS,   source_datatype: STRING, canonical_field: event_comment,  canonical_datatype: "STRING",    transform_expr: "nullif(trim(COMMENTS),'')", is_mandatory: false, is_primary_key: false, is_sensitive: true, ordinal: 7}
+
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: approval_event, is_active: true}
+    rows:
+      - {source_field: ORG_ID,               source_datatype: STRING, canonical_field: company_code,   canonical_datatype: "STRING",    transform_expr: "upper(trim(ORG_ID))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: INVOICE_ID,           source_datatype: STRING, canonical_field: invoice_doc_id, canonical_datatype: "STRING",    transform_expr: "trim(INVOICE_ID)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: ACTION_DATE,          source_datatype: STRING, canonical_field: fiscal_year,    canonical_datatype: "INT",       transform_expr: "year(try_to_date(substr(trim(ACTION_DATE),1,10),'yyyy-MM-dd'))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: SEQUENCE_NUM,         source_datatype: STRING, canonical_field: event_seq,      canonical_datatype: "INT",       transform_expr: "try_cast(trim(SEQUENCE_NUM) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: APPROVAL_HISTORY_ID,  source_datatype: STRING, canonical_field: event_source_key, canonical_datatype: "STRING",  transform_expr: "trim(APPROVAL_HISTORY_ID)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      # RESPONSE uses Oracle's vocabulary (APPROVED / REJECTED / NO RESPONSE);
+      # value_domain_mapping reconciles it with TEN001's EVENT_TYPE.
+      - {source_field: RESPONSE,             source_datatype: STRING, canonical_field: event_type,     canonical_datatype: "STRING",    transform_expr: "upper(trim(RESPONSE))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: APPROVER_ID,          source_datatype: STRING, canonical_field: actor,          canonical_datatype: "STRING",    transform_expr: "upper(trim(APPROVER_ID))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: ACTION_DATE,          source_datatype: STRING, canonical_field: event_ts,       canonical_datatype: "TIMESTAMP", transform_expr: "try_to_timestamp(trim(ACTION_DATE),\"yyyy-MM-dd'T'HH:mm:ss\")", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: NOTE,                 source_datatype: STRING, canonical_field: event_comment,  canonical_datatype: "STRING",    transform_expr: "nullif(trim(NOTE),'')", is_mandatory: false, is_primary_key: false, is_sensitive: true}
+
+  # ===========================================================================
+  # INVOICE DISTRIBUTION — TEN002 only. Trap 4: this grain multiplies rows per
+  # line. Monetary aggregation happens at exactly one grain per metric (D11).
+  # ===========================================================================
+  - apply_to_all: {tenant_id: TEN002, source_system_id: TEN002_ORAFUSION, entity: invoice_distribution, is_active: true}
+    rows:
+      - {source_field: ORG_ID,                   source_datatype: STRING, canonical_field: company_code,        canonical_datatype: "STRING", transform_expr: "upper(trim(ORG_ID))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: INVOICE_ID,               source_datatype: STRING, canonical_field: invoice_doc_id,      canonical_datatype: "STRING", transform_expr: "trim(INVOICE_ID)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: GL_DATE,                  source_datatype: STRING, canonical_field: fiscal_year,         canonical_datatype: "INT",    transform_expr: "year(try_to_date(substr(trim(GL_DATE),1,10),'yyyy-MM-dd'))", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: INVOICE_LINE_NUMBER,      source_datatype: STRING, canonical_field: line_number,         canonical_datatype: "INT",    transform_expr: "try_cast(trim(INVOICE_LINE_NUMBER) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: DISTRIBUTION_LINE_NUMBER, source_datatype: STRING, canonical_field: distribution_number, canonical_datatype: "INT",    transform_expr: "try_cast(trim(DISTRIBUTION_LINE_NUMBER) AS INT)", is_mandatory: true, is_primary_key: true, is_sensitive: false}
+      - {source_field: INVOICE_DISTRIBUTION_ID,  source_datatype: STRING, canonical_field: distribution_source_key, canonical_datatype: "STRING", transform_expr: "trim(INVOICE_DISTRIBUTION_ID)", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: AMOUNT,                   source_datatype: STRING, canonical_field: amount,              canonical_datatype: "DECIMAL(18,2)", transform_expr: "try_cast(CASE WHEN trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]{1,3}([.][0-9]{3})+,[0-9]+[^0-9]*$' OR trim(AMOUNT) RLIKE '^[^0-9-]*-?[0-9]+,[0-9]{1,2}[^0-9]*$' THEN replace(regexp_replace(trim(AMOUNT),'[^0-9,\\-]',''), ',', '.') ELSE regexp_replace(trim(AMOUNT),'[^0-9.\\-]','') END AS DECIMAL(18,2))", is_mandatory: true, is_primary_key: false, is_sensitive: false}
+      - {source_field: GL_ACCOUNT_SEGMENT,       source_datatype: STRING, canonical_field: gl_account,          canonical_datatype: "STRING", transform_expr: "lpad(nullif(trim(GL_ACCOUNT_SEGMENT),''),10,'0')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: COST_CENTER_SEGMENT,      source_datatype: STRING, canonical_field: cost_center,         canonical_datatype: "STRING", transform_expr: "nullif(upper(trim(COST_CENTER_SEGMENT)),'')", is_mandatory: false, is_primary_key: false, is_sensitive: false}
+      - {source_field: GL_DATE,                  source_datatype: STRING, canonical_field: accounting_date,     canonical_datatype: "DATE",   transform_expr: "try_to_date(substr(trim(GL_DATE),1,10),'yyyy-MM-dd')", is_mandatory: false, is_primary_key: false, is_sensitive: false}

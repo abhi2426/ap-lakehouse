@@ -1,0 +1,75 @@
+# =============================================================================
+# tenants.yaml — the tenant registry, as code.
+#
+# This file is the source of truth. The platform is a projection of it.
+# Adding a tenant to the POC means adding a block here and running
+# notebooks/02_bootstrap_config. No code changes, no DDL.
+#
+# Every tenant deliberately differs in at least three dimensions (ERP, calendar,
+# currency, timezone) so that any hardcoded assumption in the framework fails
+# loudly during the POC rather than quietly during onboarding.
+# =============================================================================
+
+target_table: ap_control.config.tenant_registry
+key_columns: [tenant_id]
+
+rows:
+  - tenant_id: TEN001
+    tenant_name: Northwind Manufacturing GmbH
+    legal_entity_group: NORTHWIND_GROUP
+    erp_type: SAP_ECC
+    erp_version: "6.0 EHP8"
+    source_timezone: Europe/Berlin
+    functional_currency: EUR
+    group_currency: USD
+    fiscal_calendar: CALENDAR
+    fiscal_year_offset: 0
+    isolation_tier: SHARED_ROW_FILTER      # decision D1, confirmed 18 Sep 2026
+    onboarding_status: ACTIVE
+    sla_tier: GOLD
+    retention_years: 10                     # German commercial law is stricter than our 7-year default
+    pii_jurisdiction: GDPR
+    is_active: true
+    effective_from: "2024-01-01"
+    effective_to: null
+
+  - tenant_id: TEN002
+    tenant_name: Cascade Retail Holdings Inc
+    legal_entity_group: CASCADE_GROUP
+    erp_type: ORACLE_FUSION
+    erp_version: "24C"
+    source_timezone: America/Los_Angeles
+    functional_currency: USD
+    group_currency: USD
+    fiscal_calendar: CUSTOM                 # 4-4-5 retail calendar
+    fiscal_year_offset: 0
+    isolation_tier: SHARED_ROW_FILTER
+    onboarding_status: ACTIVE
+    sla_tier: GOLD
+    retention_years: 7
+    pii_jurisdiction: CCPA
+    is_active: true
+    effective_from: "2024-01-01"
+    effective_to: null
+
+  - tenant_id: TEN003
+    tenant_name: Meridian Services Pty Ltd
+    legal_entity_group: MERIDIAN_GROUP
+    erp_type: COUPA
+    erp_version: "R42"
+    source_timezone: Australia/Sydney
+    functional_currency: AUD
+    group_currency: USD
+    fiscal_calendar: JUL_JUN                # Australian fiscal year
+    fiscal_year_offset: 6
+    isolation_tier: SHARED_ROW_FILTER
+    onboarding_status: ACTIVE
+    sla_tier: SILVER                        # cheaper tier: a looser freshness target
+    retention_years: 7
+    pii_jurisdiction: AU_PRIVACY_ACT
+    is_active: true
+    effective_from: "2024-07-01"
+    effective_to: null
+
+# TEN004 is intentionally absent. It is created in Step 6 as the capstone
+# onboarding exercise, using configuration only.

@@ -1,0 +1,534 @@
+# =============================================================================
+# dq_rules.yaml — the data quality rule registry.
+#
+# Conventions that matter:
+#   * rule_expression is TRUE for a PASSING record. Written positively so pass
+#     rate is a plain average and the scorecard needs no inversion logic.
+#   * severity ABORT is reserved for corruption of downstream state. If a rule
+#     can be tolerated for one batch, it is not ABORT.
+#   * fail_threshold_pct lets a rule tolerate a known baseline. Null means any
+#     single failure triggers the severity.
+#   * business_impact is mandatory by convention. A rule nobody can justify is
+#     the first thing disabled during an incident at 2am.
+#   * tenant_id: ALL means every tenant. A tenant-specific rule overrides nothing —
+#     both evaluate, which is intentional.
+#
+# Rule id blocks: 0001-0099 structural, 0100-0199 completeness, 0200-0299
+# validity, 0300-0399 uniqueness, 0400-0499 consistency, 0500-0599 referential,
+# 0600-0699 timeliness, 0700-0799 accuracy/business.
+# =============================================================================
+
+target_table: ap_control.config.dq_rule_registry
+key_columns: [rule_id]
+
+rows:
+
+  # ===========================================================================
+  # STRUCTURAL — ABORT. These break the multi-tenancy model or the key model.
+  # ===========================================================================
+  - rule_id: DQ_ALL_0001
+    rule_name: tenant_id is always populated
+    tenant_id: ALL
+    layer: BRONZE
+    entity: "*"
+    scope: ROW
+    dq_dimension: COMPLETENESS
+    rule_type: NOT_NULL
+    rule_expression: "tenant_id IS NOT NULL AND trim(tenant_id) <> ''"
+    severity: ABORT
+    fail_threshold_pct: null
+    business_impact: "A null tenant_id is invisible to every row filter, so the record leaks across tenants. This is the single worst failure the platform can have."
+    remediation_hint: "The framework sets tenant_id from ingestion_config, never from data. A null here means a framework bug, not a source problem. Do not re-run; escalate."
+    owner: PLATFORM_OWNER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_ALL_0002
+    rule_name: tenant_id matches the configured tenant for this task
+    tenant_id: ALL
+    layer: BRONZE
+    entity: "*"
+    scope: AGGREGATE
+    dq_dimension: CONSISTENCY
+    rule_type: CUSTOM_SQL
+    rule_expression: "count(DISTINCT tenant_id) = 1"
+    severity: ABORT
+    fail_threshold_pct: null
+    business_impact: "More than one tenant in a single ingestion task means files were mis-filed or the path pattern resolved wrongly. Cross-tenant contamination."
+    remediation_hint: "Check the source path resolution and the tenant folder the files were dropped into. Quarantine the whole file set before re-running."
+    owner: PLATFORM_OWNER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0003
+    rule_name: Invoice header primary key is unique
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: AGGREGATE
+    dq_dimension: UNIQUENESS
+    rule_type: UNIQUE
+    rule_expression: "count(*) = count(DISTINCT concat_ws('|', tenant_id, company_code, invoice_doc_id, fiscal_year))"
+    parameters: '{"key_columns":["tenant_id","company_code","invoice_doc_id","fiscal_year"]}'
+    severity: ABORT
+    fail_threshold_pct: null
+    business_impact: "A duplicate PK fans out every downstream join, silently multiplying spend. The classic cause is omitting fiscal_year from the SAP key."
+    remediation_hint: "Group by the key and inspect. If two rows differ only by ingest time, the dedup step is mis-ordered. If they genuinely differ, the key definition is wrong."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # COMPLETENESS
+  # ===========================================================================
+  - rule_id: DQ_INV_HDR_0101
+    rule_name: Supplier invoice number is present
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: COMPLETENESS
+    rule_type: NOT_NULL
+    rule_expression: "supplier_invoice_number IS NOT NULL AND trim(supplier_invoice_number) <> ''"
+    severity: QUARANTINE
+    fail_threshold_pct: 1.00
+    business_impact: "Duplicate detection keys on the supplier's own number. Without it the invoice cannot be deduplicated and duplicate payment risk is uncontrolled."
+    remediation_hint: "Usually an OCR capture failure. Route to the AP team to key manually rather than guessing from the internal document number."
+    owner: AP_TRANSFORMATION_LEAD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0102
+    rule_name: Vendor is present on every invoice
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: COMPLETENESS
+    rule_type: NOT_NULL
+    rule_expression: "vendor_id IS NOT NULL AND trim(vendor_id) <> ''"
+    severity: QUARANTINE
+    fail_threshold_pct: null
+    business_impact: "An invoice with no vendor cannot be aged, paid, matched or reported. It is not a usable record."
+    remediation_hint: "Check whether the source extract truncated the vendor column. Common on positional SAP files after a layout change."
+    owner: AP_TRANSFORMATION_LEAD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_LIN_0103
+    rule_name: Invoice line tax code is present
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_line
+    scope: ROW
+    dq_dimension: COMPLETENESS
+    rule_type: NOT_NULL
+    rule_expression: "tax_code_src IS NOT NULL AND trim(tax_code_src) <> ''"
+    severity: WARN
+    fail_threshold_pct: 5.00
+    business_impact: "A missing tax code means input tax is not reclaimed. This is real unrecovered cash, but it does not break the pipeline, so it warns and trends rather than blocking."
+    remediation_hint: "Trend by vendor and channel. A spike usually means a new vendor was set up without a default tax code."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0104
+    rule_name: Capture timestamp is present
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: COMPLETENESS
+    rule_type: NOT_NULL
+    rule_expression: "capture_ts IS NOT NULL"
+    severity: WARN
+    fail_threshold_pct: 10.00
+    business_impact: "Cycle time and touchless rate are computed from capture timestamp. Without it those metrics silently exclude the record and flatter the team."
+    remediation_hint: "Do not substitute the ERP entry timestamp. If capture time is genuinely unavailable, exclude the record from the metric and say so on the dashboard."
+    owner: AP_TRANSFORMATION_LEAD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # VALIDITY
+  # ===========================================================================
+  - rule_id: DQ_INV_HDR_0201
+    rule_name: Invoice date parses to a real date
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: VALIDITY
+    rule_type: NOT_NULL
+    rule_expression: "invoice_date IS NOT NULL"
+    severity: QUARANTINE
+    fail_threshold_pct: 0.50
+    business_impact: "The transform uses try_to_date, so an unparseable date becomes null rather than failing the job. Without this rule the failure is invisible and the invoice silently drops out of aging."
+    remediation_hint: "Inspect the raw bronze value. TEN003 emits three date formats; a fourth means the coalesce chain in schema_mapping needs another branch."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0202
+    rule_name: Posting date is not in the future
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: VALIDITY
+    rule_type: RANGE
+    # Compared with the extract date, not current_date(): against the wall
+    # clock the rule silently stops firing once the data is a few months old,
+    # which is exactly what happened to the synthetic data. A posting a few
+    # days ahead in the open period is normal; more than 14 days ahead of the
+    # file that delivered it is a keying error (same window as decision D4).
+    rule_expression: "posting_date IS NULL OR posting_date <= date_add(source_file_date, 14)"
+    severity: QUARANTINE
+    fail_threshold_pct: null
+    business_impact: "A future posting date distorts period close and can indicate data entry error or deliberate period manipulation. Auditors look for this specifically."
+    remediation_hint: "Check the source timezone. A UTC-vs-local mismatch produces a one-day future date for tenants ahead of UTC, which TEN003 is."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0203
+    rule_name: Gross amount is non-zero
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: VALIDITY
+    rule_type: RANGE
+    rule_expression: "gross_amount IS NOT NULL AND gross_amount <> 0"
+    severity: QUARANTINE
+    fail_threshold_pct: 0.20
+    business_impact: "A zero-amount invoice is either a data error or a placeholder posting. Either way it pollutes invoice counts and cost-per-invoice."
+    remediation_hint: "Zero-amount rows are sometimes legitimate cancellation shells. Check doc_type before correcting; if legitimate, add a tenant-specific exemption rather than disabling this rule."
+    owner: AP_TRANSFORMATION_LEAD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0204
+    rule_name: Currency is a known ISO code
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: VALIDITY
+    rule_type: REGEX
+    rule_expression: "currency RLIKE '^[A-Z]{3}$'"
+    severity: QUARANTINE
+    fail_threshold_pct: null
+    business_impact: "An unrecognised currency cannot be converted, so the invoice has no functional or group amount and drops out of every consolidated figure."
+    remediation_hint: "Check for currency symbols leaking into the code field, or a blank defaulting incorrectly."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_VEN_BNK_0205
+    rule_name: Bank account number has plausible structure
+    tenant_id: ALL
+    layer: SILVER
+    entity: vendor_bank
+    scope: ROW
+    dq_dimension: VALIDITY
+    rule_type: REGEX
+    rule_expression: "bank_account IS NULL OR bank_account RLIKE '^[A-Z0-9]{5,34}$'"
+    severity: WARN
+    fail_threshold_pct: 2.00
+    business_impact: "A malformed bank account causes a failed payment and a vendor call. It is also a weak fraud signal when it appears alongside a recent change."
+    remediation_hint: "Do not auto-correct. Bank details are verified by callback, never by regex."
+    owner: AP_TRANSFORMATION_LEAD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # UNIQUENESS
+  # ===========================================================================
+  - rule_id: DQ_INV_HDR_0301
+    rule_name: Supplier invoice number is unique per vendor
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: AGGREGATE
+    dq_dimension: UNIQUENESS
+    rule_type: UNIQUE
+    rule_expression: "count(*) = count(DISTINCT concat_ws('|', tenant_id, vendor_id, regexp_replace(upper(supplier_invoice_number),'[^A-Z0-9]','')))"
+    parameters: '{"normalise":"strip_punctuation_and_case"}'
+    severity: WARN
+    fail_threshold_pct: 0.50
+    business_impact: "Exact duplicates after normalisation are the strongest duplicate-payment signal. WARN not ABORT because legitimate re-issues exist; the candidates go to sl_duplicate_candidate for human disposition per decision D12."
+    remediation_hint: "Do not delete. Raise candidates and let AP disposition them. A false positive that suppresses a real invoice creates a vendor dispute and a late-payment penalty."
+    owner: INTERNAL_AUDIT
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_VEN_MST_0302
+    rule_name: Vendor tax id is unique within a tenant
+    tenant_id: ALL
+    layer: SILVER
+    entity: vendor_master
+    scope: AGGREGATE
+    dq_dimension: UNIQUENESS
+    rule_type: UNIQUE
+    rule_expression: "count(DISTINCT vendor_id) = count(DISTINCT nullif(tax_id,''))"
+    severity: WARN
+    fail_threshold_pct: 3.00
+    business_impact: "Two vendor records sharing a tax id are the same legal entity twice. This is how the same invoice gets paid under two vendor numbers."
+    remediation_hint: "Feeds the vendor master duplication rate (KPI 36) and sl_vendor_resolved. Merging vendors is a master-data decision, not a pipeline decision."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # CONSISTENCY
+  # ===========================================================================
+  - rule_id: DQ_INV_0401
+    rule_name: Header gross equals sum of lines plus tax
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: CROSS_ENTITY
+    dq_dimension: CONSISTENCY
+    rule_type: SUM_MATCH
+    rule_expression: "abs(gross_amount - (line_net_total + coalesce(tax_amount,0))) <= 0.02"
+    parameters: '{"join_entity":"invoice_line","join_keys":["tenant_id","company_code","invoice_doc_id","fiscal_year"],"tolerance":0.02}'
+    severity: QUARANTINE
+    fail_threshold_pct: 1.00
+    business_impact: "Header and lines disagreeing means either lines are missing, the gross/net distinction was mishandled, or the Oracle line-vs-distribution grain was flattened wrongly. All three corrupt spend."
+    remediation_hint: "Check trap 5 (gross vs net) and trap 4 (line vs distribution) from the Step 1 document before assuming the source is wrong."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0402
+    rule_name: Credit memos carry a negative amount
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: CONSISTENCY
+    rule_type: CUSTOM_SQL
+    # Both directions: a credit memo must be negative AND an invoice must not
+    # be. The original caught only the first, so NEGATIVE_NON_CREDIT never fired.
+    rule_expression: "doc_type_canonical IS NULL OR gross_amount IS NULL OR gross_amount = 0 OR ((doc_type_canonical = 'CREDIT_MEMO') = (gross_amount < 0))"
+    severity: QUARANTINE
+    fail_threshold_pct: 0.10
+    business_impact: "A positive credit memo adds to spend instead of reducing it. On SAP sources this means the debit/credit indicator was not applied."
+    remediation_hint: "Verify the SHKZG handling in the schema_mapping transform expression for this tenant."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_LIN_0403
+    rule_name: Tax amount is consistent with the tax code rate
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_line
+    scope: CROSS_ENTITY
+    dq_dimension: ACCURACY
+    rule_type: CUSTOM_SQL
+    rule_expression: "tax_code_src IS NULL OR tax_rate_pct IS NULL OR abs(coalesce(tax_amount,0) - round(net_amount * tax_rate_pct / 100, 2)) <= greatest(0.02, abs(net_amount) * 0.001)"
+    parameters: '{"ref_table":"ap_control.ref.tax_code","effective_dated":true}'
+    severity: WARN
+    fail_threshold_pct: 3.00
+    business_impact: "Tax inconsistent with the statutory rate means either a wrong code or a manual override. Both create tax-authority exposure and unrecovered input tax."
+    remediation_hint: "Join against the rate in force at the invoice date, not today's rate. Rates change by statute."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # REFERENTIAL INTEGRITY
+  # ===========================================================================
+  - rule_id: DQ_INV_HDR_0501
+    rule_name: Invoice vendor exists in vendor master
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_header
+    scope: CROSS_ENTITY
+    dq_dimension: REFERENTIAL_INTEGRITY
+    rule_type: FK_EXISTS
+    rule_expression: "vendor_exists = true"
+    parameters: '{"ref_table":"ap_silver.ap.sl_vendor","ref_keys":["tenant_id","vendor_id"],"point_in_time":"invoice_date"}'
+    severity: QUARANTINE
+    fail_threshold_pct: 0.50
+    business_impact: "An invoice against an unknown vendor cannot be validated, matched or reported by vendor. It is also a fraud pattern worth investigating."
+    remediation_hint: "Check load order first: vendor_master has load_priority 10 and must land before invoices. A genuine orphan is an exception, not a load-order bug."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_LIN_0502
+    rule_name: Invoice line has a parent header
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_line
+    scope: CROSS_ENTITY
+    dq_dimension: REFERENTIAL_INTEGRITY
+    rule_type: FK_EXISTS
+    rule_expression: "header_exists = true"
+    parameters: '{"ref_table":"ap_silver.ap.sl_invoice_header","ref_keys":["tenant_id","company_code","invoice_doc_id","fiscal_year"]}'
+    severity: QUARANTINE
+    fail_threshold_pct: 0.30
+    business_impact: "Orphan lines inflate line counts and break header-to-line reconciliation. They usually mean the header file and line file came from different extract runs."
+    remediation_hint: "Check whether header and line files share a batch. If not, the tenant's extract is not transactionally consistent and needs a snapshot marker."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_LIN_0503
+    rule_name: GL account exists and is active
+    tenant_id: ALL
+    layer: SILVER
+    entity: invoice_line
+    scope: CROSS_ENTITY
+    dq_dimension: REFERENTIAL_INTEGRITY
+    rule_type: FK_EXISTS
+    rule_expression: "gl_account IS NULL OR gl_account_active = true"
+    parameters: '{"ref_table":"ap_control.ref.gl_account","ref_keys":["tenant_id","gl_account"]}'
+    severity: WARN
+    fail_threshold_pct: 2.00
+    business_impact: "Posting to an inactive account creates a reconciliation break at close that the controller has to chase manually."
+    remediation_hint: "Confirm the chart of accounts extract is current before treating this as a posting error."
+    owner: CONTROLLER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_ALL_0504
+    rule_name: Source value domain codes are all mapped
+    tenant_id: ALL
+    layer: SILVER
+    entity: "*"
+    scope: ROW
+    dq_dimension: REFERENTIAL_INTEGRITY
+    rule_type: ALLOWED_VALUES
+    rule_expression: "unmapped_domain_values = 0"
+    parameters: '{"ref_table":"ap_control.config.value_domain_mapping"}'
+    severity: QUARANTINE
+    fail_threshold_pct: null
+    business_impact: "An unmapped code passed through silently would appear in reports as a raw source value, which is how three tenants end up with three names for the same status on one dashboard."
+    remediation_hint: "Add the mapping to value_domain_mapping and re-drive. Never pass the raw value through as a fallback."
+    owner: DATA_STEWARD
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # ===========================================================================
+  # TIMELINESS
+  # ===========================================================================
+  - rule_id: DQ_ALL_0601
+    rule_name: Source file is within its freshness window
+    tenant_id: ALL
+    layer: BRONZE
+    entity: "*"
+    scope: AGGREGATE
+    dq_dimension: TIMELINESS
+    rule_type: CUSTOM_SQL
+    rule_expression: "max_file_age_hours <= configured_max_file_age_hours"
+    parameters: '{"source":"ap_control.config.ingestion_config.max_file_age_hours"}'
+    severity: WARN
+    fail_threshold_pct: null
+    business_impact: "A stale file means the tenant has stopped delivering. Reports still render, which is worse than failing: the numbers look fine and are silently out of date."
+    remediation_hint: "Contact the source system owner named in source_system_registry. Do not backfill around the gap without telling the consumer."
+    owner: PLATFORM_OWNER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_INV_HDR_0602
+    rule_name: Correction arrives within the bounded lateness window
+    tenant_id: TEN003
+    layer: SILVER
+    entity: invoice_header
+    scope: ROW
+    dq_dimension: TIMELINESS
+    rule_type: CUSTOM_SQL
+    # A late CORRECTION is a restatement that changes the amount and arrives
+    # more than 14 days after the posting date. A first appearance is history,
+    # not a correction; a restatement that only lifts a payment block does not
+    # alter the closed period. is_restatement, changed_fields and
+    # source_file_date (the extract date: when it arrived) come from silver
+    # conformance. Revised in Step 4: the original referenced an ingest_date
+    # that no layer produced, so the rule could never have been evaluated.
+    rule_expression: "NOT is_restatement OR NOT array_contains(changed_fields, 'gross_amount') OR datediff(source_file_date, posting_date) <= 14"
+    severity: QUARANTINE
+    fail_threshold_pct: null
+    business_impact: "Per decision D4, a correction older than the lateness window would alter a closed period. Applying it silently is an audit finding; rejecting it is a data defect. So it goes to review."
+    remediation_hint: "Route to the controller. Applying the correction requires an explicit decision and a logged justification, not a pipeline default."
+    owner: CONTROLLER
+    effective_from: "2024-07-01"
+    is_active: true
+
+  # ===========================================================================
+  # BUSINESS ACCURACY
+  # ===========================================================================
+  - rule_id: DQ_PO_HIS_0701
+    rule_name: Receipt quantity does not exceed PO quantity beyond tolerance
+    tenant_id: ALL
+    layer: SILVER
+    entity: po_history
+    scope: CROSS_ENTITY
+    dq_dimension: ACCURACY
+    rule_type: CUSTOM_SQL
+    rule_expression: "received_qty <= po_qty * (1 + coalesce(qty_tolerance_pct,0)/100)"
+    parameters: '{"tolerance_source":"ap_control.config.tolerance_config","tolerance_type":"QUANTITY"}'
+    severity: WARN
+    fail_threshold_pct: 2.00
+    business_impact: "Over-receipt beyond tolerance means we may pay for goods never ordered. It is also the leading indicator of a GR/IR break."
+    remediation_hint: "Use the tolerance in force at the receipt date, not today's. Tolerances are effective-dated for exactly this reason."
+    owner: PROCUREMENT
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_REC_0702
+    rule_name: Bronze to silver row reconciliation
+    tenant_id: ALL
+    layer: SILVER
+    entity: "*"
+    scope: AGGREGATE
+    dq_dimension: CONSISTENCY
+    rule_type: ROW_COUNT
+    rule_expression: "silver_count + quarantined_count = bronze_count"
+    severity: ABORT
+    fail_threshold_pct: null
+    business_impact: "Rows must be conserved. A record that is neither in silver nor in quarantine has been silently lost, which invalidates every number downstream."
+    remediation_hint: "This is a framework bug, not a data problem. Check the dedup step and the join cardinality in the conformance engine."
+    owner: PLATFORM_OWNER
+    effective_from: "2024-01-01"
+    is_active: true
+
+  - rule_id: DQ_VEN_BNK_0703
+    rule_name: Bank change followed by payment was verified
+    tenant_id: ALL
+    layer: GOLD
+    entity: vendor_change_event
+    scope: ROW
+    dq_dimension: ACCURACY
+    rule_type: CUSTOM_SQL
+    rule_expression: "change_type <> 'BANK_ACCOUNT' OR days_to_next_payment > 14 OR is_verified = true"
+    severity: WARN
+    fail_threshold_pct: null
+    business_impact: "An unverified bank change followed closely by a payment is the exact signature of invoice-redirection fraud. Every occurrence is investigated individually."
+    remediation_hint: "WARN rather than block because the payment has already happened by the time we see it. This feeds KPI 34 and an audit alert, not a pipeline halt."
+    owner: INTERNAL_AUDIT
+    effective_from: "2024-01-01"
+    is_active: true
+
+  # TEN003-specific: no verification flag exists at source, so rule 0703 would
+  # fire on every change. This tenant-scoped rule records the control gap
+  # explicitly rather than letting a permanent red light train people to ignore it.
+  - rule_id: DQ_VEN_BNK_0704
+    rule_name: TEN003 bank verification control gap is acknowledged
+    tenant_id: TEN003
+    layer: GOLD
+    entity: vendor_change_event
+    scope: AGGREGATE
+    dq_dimension: COMPLETENESS
+    rule_type: CUSTOM_SQL
+    rule_expression: "1 = 1"
+    severity: WARN
+    fail_threshold_pct: null
+    business_impact: "TEN003's source has no bank verification flag. The control cannot be evidenced for this tenant. Recorded as a known gap so it appears in the audit pack rather than being discovered during fieldwork."
+    remediation_hint: "Resolution is a source change at the tenant, not a pipeline change. Tracked in the onboarding checklist as a waived-with-justification item."
+    owner: INTERNAL_AUDIT
+    effective_from: "2024-07-01"
+    is_active: true

@@ -1,0 +1,70 @@
+# =============================================================================
+# transformations_gold.yaml — gold job registry: 13 dimensions, 13 facts,
+# 4 aggregates. Same table and loader as transformations.yaml; the loader merges
+# both files before loading, so neither can deactivate the other's rows.
+#
+# Every job here MUST have a builder in src/ap_platform/gold/registry.py. The
+# orchestrator fails the plan otherwise: a gold table is a modelling decision
+# about grain and keys, and config alone must not be able to conjure one.
+#
+# depends_on lists GOLD jobs (which set the wave) and the SILVER jobs a builder
+# reads (documentation; silver has already run when gold starts).
+#
+# Waves derived from this file:
+#   1  13 dimensions, plus DQ results, approval events, duplicate candidates, GR/IR
+#   2  invoice header, payment, vendor change, lifecycle, DQ scorecard
+#   3  invoice line, payment application, vendor spend
+#   4  open item snapshot, match exception, DPO
+#   5  aging aggregate, silver-to-gold reconciliation
+# =============================================================================
+
+target_table: ap_control.config.transformation_config
+key_columns: [job_id, tenant_id]
+
+_defaults:
+  g: &G
+    tenant_id: ALL
+    layer: GOLD
+    scd_type: NONE
+    optimize_frequency: WEEKLY
+    is_active: true
+
+rows:
+  # --- dimensions -------------------------------------------------------------
+  - {<<: *G, job_id: GD_DIM_DATE,            target_table: ap_gold.ap.dim_date,            source_tables: "generated",                                  write_mode: OVERWRITE, cluster_columns: "date_key", optimize_frequency: NEVER}
+  - {<<: *G, job_id: GD_DIM_FISCAL_CALENDAR, target_table: ap_gold.ap.dim_fiscal_calendar, source_tables: "ap_control.config.tenant_registry",          write_mode: OVERWRITE, cluster_columns: "tenant_id,date_key", optimize_frequency: NEVER}
+  - {<<: *G, job_id: GD_DIM_TENANT,          target_table: ap_gold.ap.dim_tenant,          source_tables: "ap_control.config.tenant_registry",          write_mode: OVERWRITE, cluster_columns: "tenant_id", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_COMPANY,         target_table: ap_gold.ap.dim_company,         source_tables: "ap_control.ref.company_code",                write_mode: OVERWRITE, cluster_columns: "tenant_id", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_VENDOR,          target_table: ap_gold.ap.dim_vendor,          source_tables: "ap_silver.ap.sl_vendor", depends_on: "SL_VENDOR", write_mode: MERGE, merge_keys: "tenant_id,vendor_id,valid_from", scd_type: SCD2, scd_tracked_columns: "vendor_name,country_code,payment_terms_canonical,is_blocked", cluster_columns: "tenant_id,vendor_id"}
+  - {<<: *G, job_id: GD_DIM_VENDOR_BANK,     target_table: ap_gold.ap.dim_vendor_bank,     source_tables: "ap_silver.ap.sl_vendor_bank", depends_on: "SL_VENDOR_BANK", write_mode: OVERWRITE, scd_type: SCD2, cluster_columns: "tenant_id,vendor_id"}
+  - {<<: *G, job_id: GD_DIM_CURRENCY,        target_table: ap_gold.ap.dim_currency,        source_tables: "ap_control.ref.currency_rate",               write_mode: OVERWRITE, cluster_columns: "currency_code", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_PAYMENT_TERMS,   target_table: ap_gold.ap.dim_payment_terms,   source_tables: "ap_control.ref.payment_terms",               write_mode: OVERWRITE, cluster_columns: "payment_terms_code", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_GL_ACCOUNT,      target_table: ap_gold.ap.dim_gl_account,      source_tables: "ap_control.ref.gl_account",                  write_mode: OVERWRITE, cluster_columns: "tenant_id", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_COST_CENTER,     target_table: ap_gold.ap.dim_cost_center,     source_tables: "ap_silver.ap.sl_invoice_line", depends_on: "SL_INVOICE_LINE", write_mode: OVERWRITE, cluster_columns: "tenant_id", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_DOC_TYPE,        target_table: ap_gold.ap.dim_doc_type,        source_tables: "ap_control.config.value_domain_mapping",     write_mode: OVERWRITE, cluster_columns: "doc_type_code", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_CAPTURE_CHANNEL, target_table: ap_gold.ap.dim_capture_channel, source_tables: "ap_control.config.value_domain_mapping",     write_mode: OVERWRITE, cluster_columns: "capture_channel_code", scd_type: SCD1}
+  - {<<: *G, job_id: GD_DIM_DQ_RULE,         target_table: ap_gold.ap.dim_dq_rule,         source_tables: "ap_control.config.dq_rule_registry",         write_mode: OVERWRITE, cluster_columns: "rule_id", scd_type: SCD1}
+
+  # --- facts ------------------------------------------------------------------
+  - {<<: *G, job_id: GD_FACT_INVOICE_HEADER,  target_table: ap_gold.ap.fact_ap_invoice_header,  source_tables: "ap_silver.ap.sl_invoice_header,ap_silver.ap.sl_ap_item", depends_on: "GD_DIM_VENDOR,SL_INVOICE_HEADER,SL_AP_ITEM", write_mode: MERGE, merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year", cluster_columns: "tenant_id,posting_date", optimize_frequency: DAILY}
+  - {<<: *G, job_id: GD_FACT_INVOICE_LINE,    target_table: ap_gold.ap.fact_ap_invoice_line,    source_tables: "ap_silver.ap.sl_invoice_line,ap_silver.ap.sl_three_way_match", depends_on: "GD_FACT_INVOICE_HEADER,SL_INVOICE_LINE,SL_THREE_WAY_MATCH", write_mode: MERGE, merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year,line_number", cluster_columns: "tenant_id,invoice_doc_id", optimize_frequency: DAILY}
+  - {<<: *G, job_id: GD_FACT_PAYMENT,         target_table: ap_gold.ap.fact_ap_payment,         source_tables: "ap_silver.ap.sl_payment", depends_on: "GD_DIM_VENDOR,SL_PAYMENT", write_mode: MERGE, merge_keys: "tenant_id,payment_doc_id,fiscal_year", cluster_columns: "tenant_id,payment_date", optimize_frequency: DAILY}
+  - {<<: *G, job_id: GD_FACT_PAYMENT_APPLICATION, target_table: ap_gold.ap.fact_ap_payment_application, source_tables: "ap_silver.ap.sl_payment_application", depends_on: "GD_FACT_PAYMENT,GD_FACT_INVOICE_HEADER,SL_PAYMENT_APPLICATION", write_mode: MERGE, merge_keys: "tenant_id,company_code,run_date,run_id,payment_doc_id,invoice_doc_id,invoice_fiscal_year,invoice_line_number,application_id", cluster_columns: "tenant_id,payment_date", optimize_frequency: DAILY}
+  # Periodic snapshot. Aging as at a past date cannot be recomputed once partial
+  # payments, voids and reversals exist, so each snapshot is kept, not rebuilt.
+  - {<<: *G, job_id: GD_FACT_OPEN_ITEM_SNAPSHOT, target_table: ap_gold.ap.fact_ap_open_item_snapshot, source_tables: "ap_silver.ap.sl_invoice_header,ap_silver.ap.sl_ap_item", depends_on: "GD_FACT_PAYMENT_APPLICATION,GD_DIM_VENDOR,SL_AP_ITEM", write_mode: SNAPSHOT, merge_keys: "tenant_id,snapshot_date,company_code,accounting_doc_id,fiscal_year,line_item", snapshot_grain: DAILY, cluster_columns: "tenant_id,snapshot_date", optimize_frequency: DAILY}
+  - {<<: *G, job_id: GD_FACT_GRIR_SNAPSHOT,   target_table: ap_gold.ap.fact_grir_snapshot,      source_tables: "ap_silver.ap.sl_grir_position", depends_on: "SL_GRIR_POSITION", write_mode: SNAPSHOT, merge_keys: "tenant_id,snapshot_date,po_number,po_line_number", snapshot_grain: DAILY, cluster_columns: "tenant_id,snapshot_date"}
+  # Accumulating snapshot: milestone timestamps in one row.
+  - {<<: *G, job_id: GD_FACT_INVOICE_LIFECYCLE, target_table: ap_gold.ap.fact_invoice_lifecycle, source_tables: "ap_silver.ap.sl_invoice_header,ap_silver.ap.sl_approval_event,ap_silver.ap.sl_ap_item", depends_on: "GD_DIM_TENANT,SL_INVOICE_HEADER,SL_APPROVAL_EVENT,SL_AP_ITEM", write_mode: MERGE, merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year", cluster_columns: "tenant_id,capture_date", optimize_frequency: DAILY}
+  - {<<: *G, job_id: GD_FACT_APPROVAL_EVENT,  target_table: ap_gold.ap.fact_approval_event,     source_tables: "ap_silver.ap.sl_approval_event", depends_on: "SL_APPROVAL_EVENT", write_mode: MERGE, merge_keys: "tenant_id,company_code,invoice_doc_id,fiscal_year,event_seq", cluster_columns: "tenant_id,invoice_doc_id"}
+  - {<<: *G, job_id: GD_FACT_DUPLICATE_CANDIDATE, target_table: ap_gold.ap.fact_duplicate_candidate, source_tables: "ap_silver.ap.sl_duplicate_candidate", depends_on: "SL_DUPLICATE_CANDIDATE", write_mode: MERGE, merge_keys: "tenant_id,candidate_pair_id", cluster_columns: "tenant_id,score_band"}
+  - {<<: *G, job_id: GD_FACT_VENDOR_CHANGE_EVENT, target_table: ap_gold.ap.fact_vendor_change_event, source_tables: "ap_silver.ap.sl_vendor_change_event,ap_silver.ap.sl_payment", depends_on: "GD_DIM_VENDOR,SL_VENDOR_CHANGE_EVENT,SL_PAYMENT", write_mode: MERGE, merge_keys: "tenant_id,vendor_id,change_type,valid_from", cluster_columns: "tenant_id,change_type"}
+  - {<<: *G, job_id: GD_FACT_MATCH_EXCEPTION, target_table: ap_gold.ap.fact_match_exception,    source_tables: "ap_silver.ap.sl_three_way_match", depends_on: "GD_FACT_INVOICE_LINE,SL_THREE_WAY_MATCH", write_mode: OVERWRITE, cluster_columns: "tenant_id,match_status"}
+  - {<<: *G, job_id: GD_FACT_DQ_RESULT,       target_table: ap_gold.ap.fact_dq_result,          source_tables: "ap_control.ops.dq_result_log", write_mode: OVERWRITE, cluster_columns: "tenant_id,entity"}
+  - {<<: *G, job_id: GD_FACT_RECONCILIATION,  target_table: ap_gold.ap.fact_reconciliation,     source_tables: "ap_silver.ap.sl_invoice_header", depends_on: "GD_FACT_INVOICE_HEADER,GD_FACT_INVOICE_LINE,GD_FACT_PAYMENT,GD_FACT_PAYMENT_APPLICATION", write_mode: MERGE, merge_keys: "tenant_id,gold_table", cluster_columns: "tenant_id"}
+
+  # --- aggregates -------------------------------------------------------------
+  - {<<: *G, job_id: GD_AGG_AP_AGING_DAILY,     target_table: ap_gold.ap.agg_ap_aging_daily,     source_tables: "ap_gold.ap.fact_ap_open_item_snapshot", depends_on: "GD_FACT_OPEN_ITEM_SNAPSHOT", write_mode: SNAPSHOT, merge_keys: "tenant_id,snapshot_date,company_code,currency,aging_bucket", snapshot_grain: DAILY, cluster_columns: "tenant_id,snapshot_date"}
+  - {<<: *G, job_id: GD_AGG_DPO_MONTHLY,        target_table: ap_gold.ap.agg_dpo_monthly,        source_tables: "ap_gold.ap.fact_ap_invoice_header,ap_gold.ap.fact_ap_payment_application", depends_on: "GD_FACT_INVOICE_HEADER,GD_FACT_PAYMENT_APPLICATION", write_mode: OVERWRITE, cluster_columns: "tenant_id,year_month"}
+  - {<<: *G, job_id: GD_AGG_VENDOR_SPEND_MONTHLY, target_table: ap_gold.ap.agg_vendor_spend_monthly, source_tables: "ap_gold.ap.fact_ap_invoice_header", depends_on: "GD_FACT_INVOICE_HEADER", write_mode: OVERWRITE, cluster_columns: "tenant_id,year_month"}
+  - {<<: *G, job_id: GD_AGG_DQ_SCORECARD_DAILY, target_table: ap_gold.ap.agg_dq_scorecard_daily, source_tables: "ap_gold.ap.fact_dq_result", depends_on: "GD_FACT_DQ_RESULT", write_mode: OVERWRITE, cluster_columns: "tenant_id,eval_date"}

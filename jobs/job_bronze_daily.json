@@ -1,0 +1,60 @@
+{
+  "name": "ap-lakehouse :: bronze daily",
+  "environments": [
+    {
+      "environment_key": "serverless",
+      "spec": {
+        "client": "1",
+        "dependencies": [
+          "pyyaml"
+        ]
+      }
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "email_notifications": {
+    "on_failure": [
+      "{{OWNER_EMAIL}}"
+    ]
+  },
+  "tags": {
+    "project": "ap-lakehouse"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 30 4 * * ?",
+    "timezone_id": "UTC",
+    "pause_status": "PAUSED"
+  },
+  "tasks": [
+    {
+      "task_key": "ingest_bronze",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/12_ingest_bronze.py",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}",
+          "dry_run": "false",
+          "use_autoloader": "false"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless"
+    },
+    {
+      "task_key": "observability",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/13_ingestion_observability.sql",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless",
+      "depends_on": [
+        {
+          "task_key": "ingest_bronze"
+        }
+      ]
+    }
+  ],
+  "description": "Reference definition (Jobs API 2.1). On Free Edition run the notebooks by hand. Replace {{REPO_ROOT}} and {{OWNER_EMAIL}} before importing. Schedules are created PAUSED."
+}

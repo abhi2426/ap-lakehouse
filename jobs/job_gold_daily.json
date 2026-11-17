@@ -1,0 +1,59 @@
+{
+  "name": "ap-lakehouse :: gold daily",
+  "environments": [
+    {
+      "environment_key": "serverless",
+      "spec": {
+        "client": "1",
+        "dependencies": [
+          "pyyaml"
+        ]
+      }
+    }
+  ],
+  "max_concurrent_runs": 1,
+  "email_notifications": {
+    "on_failure": [
+      "{{OWNER_EMAIL}}"
+    ]
+  },
+  "tags": {
+    "project": "ap-lakehouse"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 30 6 * * ?",
+    "timezone_id": "UTC",
+    "pause_status": "PAUSED"
+  },
+  "tasks": [
+    {
+      "task_key": "run_gold",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/31_run_gold.py",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}",
+          "mode": "run"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless"
+    },
+    {
+      "task_key": "semantic_layer",
+      "notebook_task": {
+        "notebook_path": "{{REPO_ROOT}}/notebooks/32_semantic_layer.sql",
+        "base_parameters": {
+          "repo_root": "{{REPO_ROOT}}"
+        },
+        "source": "WORKSPACE"
+      },
+      "environment_key": "serverless",
+      "depends_on": [
+        {
+          "task_key": "run_gold"
+        }
+      ]
+    }
+  ],
+  "description": "Reference definition (Jobs API 2.1). On Free Edition run the notebooks by hand. Replace {{REPO_ROOT}} and {{OWNER_EMAIL}} before importing. Schedules are created PAUSED."
+}

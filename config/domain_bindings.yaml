@@ -1,0 +1,34 @@
+# =============================================================================
+# domain_bindings.yaml — which canonical fields are translated through
+# value_domain_mapping, and into which column.
+#
+# Silver conformance reads this table. For each binding it looks up
+# (tenant_id, domain, upper(trim(source value))) in value_domain_mapping and
+# writes the canonical value to `target_field`. A non-null source value with
+# no mapping row is an UNMAPPED domain value: it is counted in
+# `unmapped_domain_values` and DQ_ALL_0504 quarantines the row.
+#
+# Binding is per entity, not per tenant: every tenant's payment terms go
+# through the same lookup, only the mapping ROWS differ by tenant. That is the
+# whole point — onboarding TEN004 adds mapping rows, never a binding.
+#
+# on_unmapped: QUARANTINE (DQ_ALL_0504 diverts the row) or WARN (counted only).
+# =============================================================================
+
+target_table: ap_control.config.domain_binding
+key_columns: [binding_id]
+derive_key: "{entity}__{source_field}"
+
+rows:
+  - {entity: vendor_master,  source_field: payment_terms_src, domain: PAYMENT_TERMS,   target_field: payment_terms_canonical,  on_unmapped: WARN,       is_active: true}
+  - {entity: po_header,      source_field: payment_terms_src, domain: PAYMENT_TERMS,   target_field: payment_terms_canonical,  on_unmapped: WARN,       is_active: true}
+  - {entity: invoice_header, source_field: payment_terms_src, domain: PAYMENT_TERMS,   target_field: payment_terms_canonical,  on_unmapped: QUARANTINE, is_active: true}
+  - {entity: invoice_header, source_field: doc_type_src,      domain: DOC_TYPE,        target_field: doc_type_canonical,       on_unmapped: QUARANTINE, is_active: true}
+  - {entity: invoice_header, source_field: capture_channel,   domain: CAPTURE_CHANNEL, target_field: capture_channel_canonical, on_unmapped: WARN,      is_active: true}
+  - {entity: invoice_header, source_field: payment_block_src, domain: BLOCK_REASON,    target_field: payment_block_reason,     on_unmapped: WARN,       is_active: true}
+  # Unit of measure. TEN003 emits PCE for "each" and has no mapping row for it:
+  # that gap is exercise E1 in Step 4, and the fix is one row in
+  # value_domains_silver.yaml, not a code change.
+  - {entity: invoice_line,   source_field: uom_src,           domain: UOM,             target_field: uom,                      on_unmapped: QUARANTINE, is_active: true}
+  - {entity: po_line,        source_field: uom_src,           domain: UOM,             target_field: uom,                      on_unmapped: QUARANTINE, is_active: true}
+  - {entity: po_history,     source_field: uom_src,           domain: UOM,             target_field: uom,                      on_unmapped: QUARANTINE, is_active: true}
